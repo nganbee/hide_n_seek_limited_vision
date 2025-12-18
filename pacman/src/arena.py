@@ -406,6 +406,7 @@ Examples:
     arena.load_agents()
     result, stats = arena.run_game()
     
+    print(result)
     return 0 if result in ['pacman_wins', 'ghost_wins', 'draw'] else 1
 
 
