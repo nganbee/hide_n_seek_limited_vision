@@ -387,11 +387,13 @@ class GhostAgent(BaseGhostAgent):
 
 
 # =====================================================
-# PACMAN AGENT (SEEK) - Intelligent Pursuit
+# PACMAN AGENT (SEEK) - Stable Intelligent Pursuit
 # =====================================================
 class PacmanAgent(BasePacmanAgent):
     """
-    Pacman (Seeker) - Intelligent pursuit with prediction
+    Pacman (Seeker) - Stable pursuit with consistent strategy
+    
+    FIX: Removed oscillation by using committed path planning
     """
     
     def __init__(self, **kwargs):
@@ -406,6 +408,10 @@ class PacmanAgent(BasePacmanAgent):
         # Probability map for Ghost location
         self.ghost_prob_map = np.zeros((21, 21), dtype=float)
         
+        # Committed path to avoid oscillation
+        self.committed_path = []
+        self.path_commitment_steps = 0
+        
     def step(self, map_state, my_position, enemy_position, step_number):
         """Main decision logic"""
         
@@ -414,6 +420,14 @@ class PacmanAgent(BasePacmanAgent):
         
         # Update Ghost tracking
         if enemy_position is not None:
+            # Only clear path if Ghost moved significantly
+            if self.last_known_ghost is None or \
+               abs(enemy_position[0] - self.last_known_ghost[0]) + \
+               abs(enemy_position[1] - self.last_known_ghost[1]) > 2:
+                # Ghost moved significantly - replan
+                self.committed_path = []
+                self.path_commitment_steps = 0
+            
             self.last_known_ghost = enemy_position
             self.ghost_history.append(enemy_position)
             if len(self.ghost_history) > 10:
@@ -422,17 +436,22 @@ class PacmanAgent(BasePacmanAgent):
         # Update probability map
         self._update_ghost_probability(my_position, enemy_position)
         
+        # Follow committed path to avoid oscillation
+        if self.committed_path and self.path_commitment_steps < 5:
+            self.path_commitment_steps += 1
+            return self._follow_committed_path(my_position)
+        
         # Decision based on visibility
         if enemy_position is not None:
-            # Direct pursuit with prediction
-            return self._pursue_with_prediction(my_position, enemy_position)
+            # Direct pursuit - commit to path
+            return self._pursue_direct(my_position, enemy_position)
         
         if self.last_known_ghost is not None:
-            # Search last known area
-            return self._search_area(my_position, self.last_known_ghost)
+            # Search last known area with spiral pattern
+            return self._search_area_spiral(my_position, self.last_known_ghost)
         
-        # Explore
-        return self._explore(my_position)
+        # Explore systematically
+        return self._explore_systematic(my_position)
     
     # ===== MAP UPDATE =====
     
@@ -471,7 +490,7 @@ class PacmanAgent(BasePacmanAgent):
                 # Distance from last known
                 d_from_last = abs(x - gx) + abs(y - gy)
                 
-                if d_from_last > 8:
+                if d_from_last > 10:
                     continue
                 
                 # Distance from Pacman (Ghost runs away)
@@ -483,61 +502,43 @@ class PacmanAgent(BasePacmanAgent):
     
     # ===== PURSUIT STRATEGIES =====
     
-    def _pursue_with_prediction(self, my_pos, ghost_pos):
-        """Chase with cut-off prediction"""
+    def _pursue_direct(self, my_pos, ghost_pos):
+        """Direct chase with A* pathfinding"""
         
-        # Predict Ghost's escape direction
-        predicted_pos = self._predict_ghost_position(ghost_pos)
+        # Build committed path using A*
+        path = self._astar(my_pos, ghost_pos)
         
-        if predicted_pos:
-            # Try to cut off
-            cutoff_point = self._find_cutoff_point(my_pos, ghost_pos, predicted_pos)
-            if cutoff_point:
-                return self._move_towards_multi(my_pos, cutoff_point)
+        if path and len(path) > 1:
+            self.committed_path = path
+            self.path_commitment_steps = 1
+            return self._path_to_action(my_pos, path)
         
-        # Direct chase
-        return self._move_towards_multi(my_pos, ghost_pos)
+        # Fallback: greedy pursuit
+        return self._greedy_move(my_pos, ghost_pos)
     
-    def _predict_ghost_position(self, ghost_pos):
-        """Predict where Ghost will move"""
-        if len(self.ghost_history) < 2:
-            return None
+    def _follow_committed_path(self, my_pos):
+        """Follow committed path to avoid oscillation"""
         
-        # Calculate movement vector
-        prev_pos = self.ghost_history[-2]
-        dx = ghost_pos[0] - prev_pos[0]
-        dy = ghost_pos[1] - prev_pos[1]
+        if not self.committed_path:
+            return (Move.STAY, 1)
         
-        # Predict 2 steps ahead
-        pred_x = ghost_pos[0] + dx * 2
-        pred_y = ghost_pos[1] + dy * 2
+        # Update path: remove positions we've already passed
+        while self.committed_path and my_pos == self.committed_path[0]:
+            self.committed_path.pop(0)
         
-        if 0 <= pred_x < 21 and 0 <= pred_y < 21:
-            if self.global_map[pred_x, pred_y] == EMPTY:
-                return (pred_x, pred_y)
+        # Path exhausted
+        if not self.committed_path:
+            self.path_commitment_steps = 0
+            return (Move.STAY, 1)
         
-        return None
+        # Continue on path
+        if len(self.committed_path) > 0:
+            return self._path_to_action(my_pos, [my_pos] + self.committed_path)
+        
+        return (Move.STAY, 1)
     
-    def _find_cutoff_point(self, my_pos, ghost_pos, predicted_pos):
-        """Find optimal interception point"""
-        # Path from Ghost to predicted
-        path = self._bfs(ghost_pos, predicted_pos)
-        
-        if not path:
-            return None
-        
-        # Find point where Pacman arrives first
-        for i, point in enumerate(path):
-            ghost_dist = i
-            pacman_dist = abs(point[0] - my_pos[0]) + abs(point[1] - my_pos[1])
-            
-            if pacman_dist <= ghost_dist:
-                return point
-        
-        return None
-    
-    def _search_area(self, my_pos, last_known):
-        """Search around last known position"""
+    def _search_area_spiral(self, my_pos, last_known):
+        """Spiral search around last known position"""
         
         # Find highest probability area
         max_prob_pos = np.unravel_index(
@@ -545,25 +546,38 @@ class PacmanAgent(BasePacmanAgent):
             self.ghost_prob_map.shape
         )
         
-        if self.ghost_prob_map[max_prob_pos] > 0.1:
-            return self._move_towards_multi(my_pos, max_prob_pos)
-        
-        # Move to last known
-        return self._move_towards_multi(my_pos, last_known)
-    
-    def _explore(self, my_pos):
-        """Explore unknown areas"""
-        # Find closest unknown area
-        min_dist = float('inf')
         target = None
         
-        for x in range(21):
-            for y in range(21):
-                if self.global_map[x, y] == UNKNOWN:
-                    dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
-                    if dist < min_dist:
-                        min_dist = dist
-                        target = (x, y)
+        if self.ghost_prob_map[max_prob_pos] > 0.1:
+            target = max_prob_pos
+        else:
+            # Search in expanding circles around last known
+            search_radius = 5
+            best_dist = float('inf')
+            
+            for dx in range(-search_radius, search_radius+1):
+                for dy in range(-search_radius, search_radius+1):
+                    x, y = last_known[0] + dx, last_known[1] + dy
+                    
+                    if not (0 <= x < 21 and 0 <= y < 21):
+                        continue
+                    
+                    if self.global_map[x, y] == EMPTY:
+                        dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
+                        if dist < best_dist:
+                            best_dist = dist
+                            target = (x, y)
+        
+        if target:
+            return self._move_towards_multi(my_pos, target)
+        
+        return self._greedy_move(my_pos, last_known)
+    
+    def _explore_systematic(self, my_pos):
+        """Systematic exploration of unknown areas"""
+        
+        # Find closest unknown cluster
+        target = self._find_closest_unknown_cluster(my_pos)
         
         if target:
             return self._move_towards_multi(my_pos, target)
@@ -575,26 +589,112 @@ class PacmanAgent(BasePacmanAgent):
         
         return (Move.STAY, 1)
     
+    def _find_closest_unknown_cluster(self, my_pos):
+        """Find closest unknown area with good coverage"""
+        min_dist = float('inf')
+        target = None
+        
+        for x in range(21):
+            for y in range(21):
+                if self.global_map[x, y] == UNKNOWN:
+                    # Count unknown neighbors
+                    unknown_neighbors = sum(
+                        1 for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]
+                        if 0 <= x+dx < 21 and 0 <= y+dy < 21
+                        and self.global_map[x+dx, y+dy] == UNKNOWN
+                    )
+                    
+                    if unknown_neighbors >= 2:  # Cluster of unknowns
+                        dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
+                        if dist < min_dist:
+                            min_dist = dist
+                            target = (x, y)
+        
+        return target
+    
     # ===== PATHFINDING =====
     
+    def _astar(self, start, goal):
+        """A* pathfinding for optimal path"""
+        from heapq import heappush, heappop
+        
+        frontier = []
+        heappush(frontier, (0, start, [start]))
+        visited = {start: 0}
+        
+        while frontier:
+            f_cost, current, path = heappop(frontier)
+            
+            if current == goal:
+                return path
+            
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dx, dy = move.value
+                neighbor = (current[0] + dx, current[1] + dy)
+                
+                if not self._is_valid_position(neighbor):
+                    continue
+                
+                g_cost = len(path)
+                
+                if neighbor not in visited or g_cost < visited[neighbor]:
+                    visited[neighbor] = g_cost
+                    h_cost = abs(neighbor[0] - goal[0]) + abs(neighbor[1] - goal[1])
+                    f = g_cost + h_cost
+                    heappush(frontier, (f, neighbor, path + [neighbor]))
+        
+        return []
+    
     def _move_towards_multi(self, start, goal):
-        """Multi-step pathfinding"""
-        path = self._bfs(start, goal)
+        """Multi-step pathfinding with A*"""
+        path = self._astar(start, goal)
         
         if not path or len(path) <= 1:
             return self._greedy_move(start, goal)
         
-        # Calculate how many steps we can take
-        steps = min(len(path) - 1, self.pacman_speed)
+        return self._path_to_action(start, path)
+    
+    def _path_to_action(self, start, path):
+        """Convert path to action with multi-step"""
         
-        # Determine direction
+        if len(path) <= 1:
+            return (Move.STAY, 1)
+        
+        # Determine direction from first step
         next_pos = path[1]
+        move_direction = None
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             dx, dy = move.value
             if (start[0] + dx, start[1] + dy) == next_pos:
-                return (move, steps)
+                move_direction = move
+                break
         
-        return (Move.STAY, 1)
+        if move_direction is None:
+            return (Move.STAY, 1)
+        
+        # Count how many consecutive steps in SAME direction
+        dx, dy = move_direction.value
+        steps = 0
+        current = start
+        
+        for i in range(1, min(len(path), self.pacman_speed + 1)):
+            expected_pos = (current[0] + dx, current[1] + dy)
+            
+            if i >= len(path) or path[i] != expected_pos:
+                break
+            
+            if not self._is_valid_position(expected_pos):
+                break
+            
+            steps += 1
+            current = expected_pos
+        
+        steps = max(1, steps)
+        return (move_direction, steps)
+    
+    def _is_straight_line(self, pos1, pos2):
+        """Check if two positions are in straight line"""
+        return pos1[0] == pos2[0] or pos1[1] == pos2[1]
     
     def _greedy_move(self, start, goal):
         """Greedy movement towards goal"""
@@ -620,27 +720,6 @@ class PacmanAgent(BasePacmanAgent):
                 return (move, steps)
         
         return (Move.STAY, 1)
-    
-    def _bfs(self, start, goal):
-        """BFS pathfinding"""
-        queue = deque([(start, [start])])
-        visited = {start}
-        
-        while queue:
-            pos, path = queue.popleft()
-            
-            if pos == goal:
-                return path
-            
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                dx, dy = move.value
-                new_pos = (pos[0] + dx, pos[1] + dy)
-                
-                if new_pos not in visited and self._is_valid_position(new_pos):
-                    visited.add(new_pos)
-                    queue.append((new_pos, path + [new_pos]))
-        
-        return []
     
     # ===== HELPERS =====
     
