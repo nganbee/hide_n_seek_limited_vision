@@ -406,7 +406,8 @@ Examples:
     arena.load_agents()
     result, stats = arena.run_game()
     
-    print(result)
+    steps_count = stats['total_steps']
+    print(f"{result} {steps_count}")
     return 0 if result in ['pacman_wins', 'ghost_wins', 'draw'] else 1
 
 
