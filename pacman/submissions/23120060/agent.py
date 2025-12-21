@@ -53,7 +53,7 @@ class PacmanAgent(BasePacmanAgent):
         self.name = "Pure A* Pacman (Fixed)"
         # Lấy tốc độ từ config, mặc định là 2
         speed_conf = kwargs.get("pacman_speed", kwargs.get("pacman-speed", 2))
-        self.pacman_speed = max(2, int(speed_conf))
+        self.pacman_speed = max(1, int(speed_conf))
         
         self.vision_range = 5
         self.last_known_enemy_pos = None 
@@ -273,145 +273,117 @@ class PacmanAgent(BasePacmanAgent):
 class GhostAgent(BaseGhostAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Smart Ghost (Evader)"
-        self.last_known_pacman_pos = None
-        self.map_h = 0
-        self.map_w = 0
+        self.name = "Survivalist - Minimax"
+        self.last_pacman_pos = None
+        self.map_size = (21, 21)
+        self.global_map = None
 
     def step(self, map_state, my_position, enemy_position, step_number):
-        self.map_h, self.map_w = map_state.shape
-        
-        # Cập nhật vị trí Pacman
-        if enemy_position is not None:
-            self.last_known_pacman_pos = enemy_position
-            
-        # CHIẾN THUẬT 1: Nếu biết Pacman ở đâu -> Chạy trốn (Evade)
-        # Ưu tiên vị trí nhìn thấy trực tiếp, sau đó đến vị trí ghi nhớ
-        target_pacman = enemy_position if enemy_position else self.last_known_pacman_pos
-        
-        if target_pacman is not None:
-            return self._evade_strategy(my_position, target_pacman, map_state)
-            
-        # CHIẾN THUẬT 2: Nếu không biết -> Đi tuần tra an toàn
-        return self._patrol_strategy(my_position, map_state)
+        if self.global_map is None: self.global_map = map_state
+        else: self.global_map[map_state != -1] = map_state[map_state != -1]
 
-    def _evade_strategy(self, my_pos, pacman_pos, map_state):
-        """
-        Chọn hướng đi an toàn nhất (Survival Score cao nhất).
-        Trả về: Move enum
-        """
-        valid_moves = self._get_valid_moves(my_pos, map_state)
-        
-        # Nếu bị kẹt, đứng yên
-        if not valid_moves:
-            return Move.STAY
+        if enemy_position: self.last_pacman_pos = enemy_position
 
-        best_move = random.choice(valid_moves)
-        max_score = -float('inf')
-        
-        # Shuffle để khó đoán
-        random.shuffle(valid_moves) 
+        # Nếu không biết Pacman ở đâu, đi random an toàn
+        if not self.last_pacman_pos:
+            return self._patrol(my_position)
 
-        for move in valid_moves:
-            # 1. Giả định vị trí tiếp theo
-            dr, dc = move.value
-            next_pos = (my_pos[0] + dr, my_pos[1] + dc)
-            
-            # 2. Tính điểm sinh tồn
-            score = self._calculate_survival_score(next_pos, pacman_pos, map_state)
-            
-            if score > max_score:
-                max_score = score
-                best_move = move
-        
-        # CHỈ RETURN MOVE (Không return tuple)
+        # Kích hoạt Minimax
+        best_move = self._minimax_move(my_position, self.last_pacman_pos)
         return best_move
 
-    def _calculate_survival_score(self, pos, pacman_pos, map_state):
-        """
-        Score = (Khoảng cách BFS) - (Phạt ngõ cụt) + (Thưởng tàng hình)
-        """
-        score = 0
-        
-        # 1. Khoảng cách thực tế (BFS)
-        dist = self._bfs_distance(pos, pacman_pos, map_state, limit=15)
-        
-        if dist < 3:
-            score += dist * 100 # Rất gần -> Ưu tiên cực cao cho việc tăng khoảng cách
-        else:
-            score += dist * 10 
+    def _minimax_move(self, ghost_pos, pacman_pos):
+        valid_moves = self._get_valid_moves(ghost_pos)
+        if not valid_moves: return Move.STAY
+
+        best_score = -float('inf')
+        best_moves = []
+
+        # 1. GHOST MOVE (MAX LAYER)
+        for move in valid_moves:
+            next_g_pos = self._get_next_pos(ghost_pos, move)
             
-        # 2. Tránh ngõ cụt
-        if self._is_dead_end(pos, map_state):
-            score -= 500
+            # Nếu đi vào chỗ chết ngay lập tức -> Bỏ qua
+            if self._manhattan_distance(next_g_pos, pacman_pos) <= 2:
+                score = -9999
+            else:
+                # 2. PACMAN MOVE (MIN LAYER - PREDICTION)
+                # Dự đoán Pacman sẽ đi 2 bước tối ưu nhất để bắt Ghost
+                pred_p_pos = self._predict_pacman_best_move(pacman_pos, next_g_pos, steps=2)
+                
+                # 3. EVALUATE STATE
+                score = self._evaluate_state(next_g_pos, pred_p_pos)
+
+            if score > best_score:
+                best_score = score
+                best_moves = [move]
+            elif score == best_score:
+                best_moves.append(move)
+        
+        return random.choice(best_moves) if best_moves else Move.STAY
+
+    def _predict_pacman_best_move(self, p_pos, target_g, steps=2):
+        """Giả lập Pacman lao tới Ghost nhanh nhất có thể"""
+        curr = p_pos
+        for _ in range(steps):
+            # Tìm nước đi giảm khoảng cách Manhattan nhiều nhất
+            moves = self._get_valid_moves(curr)
+            best_next = curr
+            min_dist = float('inf')
             
-        # 3. Né tầm nhìn chữ thập (Anti-Cross Vision)
-        if pos[0] != pacman_pos[0] and pos[1] != pacman_pos[1]:
+            for m in moves:
+                nxt = self._get_next_pos(curr, m)
+                # Pacman cũng phải né tường
+                dist = self._manhattan_distance(nxt, target_g)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_next = nxt
+            curr = best_next
+            if curr == target_g: break
+        return curr
+
+    def _evaluate_state(self, g_pos, p_pos):
+        dist = self._manhattan_distance(g_pos, p_pos)
+        
+        if dist <= 2:
+            return -1000 + dist # Ưu tiên chết xa hơn chút
+        
+        score = dist * 10
+        
+        # Thưởng nếu phá trục
+        if g_pos[0] != p_pos[0] and g_pos[1] != p_pos[1]:
             score += 50
+            
+        # Thưởng nếu gần ngã rẽ
+        if not self._is_dead_end(g_pos):
+            score += 20
             
         return score
 
-    def _patrol_strategy(self, my_pos, map_state):
-        """Đi tuần tra, tránh ngõ cụt."""
-        valid_moves = self._get_valid_moves(my_pos, map_state)
-        
-        if not valid_moves:
-            return Move.STAY
+    def _patrol(self, pos):
+        moves = self._get_valid_moves(pos)
+        safe = [m for m in moves if not self._is_dead_end(self._get_next_pos(pos, m))]
+        return random.choice(safe) if safe else (random.choice(moves) if moves else Move.STAY)
 
-        # Lọc ra các nước đi an toàn
-        safe_moves = []
-        for move in valid_moves:
-            dr, dc = move.value
-            next_pos = (my_pos[0] + dr, my_pos[1] + dc)
-            if not self._is_dead_end(next_pos, map_state):
-                safe_moves.append(move)
-        
-        # Ưu tiên đi đường an toàn
-        if safe_moves:
-            return random.choice(safe_moves)
-            
-        # Nếu kẹt trong ngõ cụt thì đi đại để thoát ra
-        return random.choice(valid_moves)
-
-    # --- HELPERS ---
-
-    def _get_valid_moves(self, pos, map_state):
+    def _get_valid_moves(self, pos):
         moves = []
-        r, c = pos
-        # Đảm bảo Move enum có sẵn
-        all_directions = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        
-        for move in all_directions:
-            dr, dc = move.value
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < self.map_h and 0 <= nc < self.map_w:
-                if map_state[nr, nc] == 0:
-                    moves.append(move)
+        for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_passable(self._get_next_pos(pos, m)): moves.append(m)
         return moves
 
-    def _bfs_distance(self, start, goal, map_state, limit=15):
-        queue = deque([(start, 0)])
-        visited = {start}
-        while queue:
-            curr, dist = queue.popleft()
-            if curr == goal: return dist
-            if dist >= limit: return limit
-            
-            r, c = curr
-            for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < self.map_h and 0 <= nc < self.map_w:
-                    if map_state[nr, nc] == 0 and (nr, nc) not in visited:
-                        visited.add((nr, nc))
-                        queue.append(((nr, nc), dist + 1))
-        return 999
+    def _get_next_pos(self, pos, move):
+        return (pos[0]+move.value[0], pos[1]+move.value[1])
 
-    def _is_dead_end(self, pos, map_state):
+    def _is_passable(self, pos):
         r, c = pos
+        if 0 <= r < 21 and 0 <= c < 21: return self.global_map[r, c] != 1
+        return False
+
+    def _manhattan_distance(self, p1, p2):
+        return abs(p1[0]-p2[0]) + abs(p1[1]-p2[1])
+
+    def _is_dead_end(self, pos):
         exits = 0
-        for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < self.map_h and 0 <= nc < self.map_w:
-                if map_state[nr, nc] == 0:
-                    exits += 1
+        for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_passable(self._get_next_pos(pos, m)): exits += 1
         return exits <= 1
