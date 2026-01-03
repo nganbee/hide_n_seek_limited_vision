@@ -24,491 +24,222 @@ EMPTY = 0
 WALL = 1
 
 
-# =====================================================
-# GHOST AGENT (HIDE) - PROACTIVE Strategy
-# =====================================================
-from collections import deque
+from collections import deque, defaultdict
 import numpy as np
+from environment import Move
+from agent_interface import GhostAgent as BaseGhostAgent
+
+
 
 class GhostAgent(BaseGhostAgent):
     """
-    Ghost (Hider) - PROACTIVE hiding strategy
-    
-    KEY DIFFERENCE FROM REACTIVE:
-    1. Maintains a GOAL (safe zone to reach)
-    2. Plans PATHS in advance, not just next move
-    3. Only replans when goal becomes unsafe
-    4. Uses "potential field" for long-term positioning
+    Hiding Agent – Turn-first with tabu memory
+
+    Fixes:
+    - Corridor re-entry
+    - Turn oscillation
+    - Directional backtracking
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
         self.global_map = np.full((21, 21), UNKNOWN, dtype=int)
-        
-        # Pacman tracking
+
+        self.recent_positions = deque(maxlen=6)
+        self.tabu_positions = deque(maxlen=5)   # <<< NEW
+
+        self.bad_directions = defaultdict(int)
+        self.last_move = None
+
         self.last_seen_pacman = None
-        self.steps_since_seen = 0
-        
-        # PROACTIVE components
-        self.current_goal = None  # Target safe position
-        self.planned_path = []    # Committed path to goal
-        self.path_step = 0        # Progress on path
-        self.goal_validity_steps = 0  # How long goal has been valid
-        
-        # Strategic map (updated infrequently)
-        self.safe_zones = []      # Pre-computed safe areas
-        self.danger_zones = []    # Pre-computed danger areas
-        self.last_strategy_update = -100
+        self.steps_since_seen = 999
 
     # =====================================================
-    # MAIN STEP - PROACTIVE DECISION
+    # MAIN STEP
     # =====================================================
     def step(self, map_state, my_pos, enemy_pos, step_number):
-        
-        self._update_global_map(map_state)
-        
-        # Update strategic map periodically (not every step)
-        if step_number - self.last_strategy_update > 20:
-            self._update_strategic_map()
-            self.last_strategy_update = step_number
-        
-        # Update Pacman tracking
+
+        self._update_map(map_state)
+        self._decay_bad_directions()
+
+        self.recent_positions.append(my_pos)
+        self.tabu_positions.append(my_pos)   # <<< track tabu
+
         if enemy_pos is not None:
             self.last_seen_pacman = enemy_pos
             self.steps_since_seen = 0
         else:
             self.steps_since_seen += 1
-        
-        # === PROACTIVE DECISION LOGIC ===
-        
-        # 1. Check if current goal is still valid
-        goal_valid = self._is_goal_still_valid(my_pos, enemy_pos)
-        
-        # 2. If goal invalid OR no goal, create new goal
-        if not goal_valid or self.current_goal is None:
-            self._create_new_goal(my_pos, enemy_pos, step_number)
-            self.goal_validity_steps = 0
+
+        if enemy_pos:
+            move = self._choose_move(my_pos, enemy_pos)
+        elif self.last_seen_pacman and self.steps_since_seen <= 6:
+            move = self._choose_move(my_pos, self.last_seen_pacman)
         else:
-            self.goal_validity_steps += 1
-        
-        # 3. Execute plan toward goal (not just next move!)
-        move = self._execute_plan(my_pos, enemy_pos)
-        
+            move = self._choose_move(my_pos, None)
+
+        self.last_move = move
         return move
 
     # =====================================================
-    # MAP UPDATE
+    # MOVE SELECTION (TABU-AWARE)
     # =====================================================
-    def _update_global_map(self, local_map):
-        for i in range(21):
-            for j in range(21):
-                if local_map[i, j] != UNKNOWN:
-                    self.global_map[i, j] = local_map[i, j]
+    def _choose_move(self, my_pos, pacman_pos):
 
-    # =====================================================
-    # STRATEGIC MAP (PROACTIVE PLANNING)
-    # =====================================================
-    def _update_strategic_map(self):
-        """
-        Pre-compute safe and danger zones
-        This is PROACTIVE: plan before threat arrives
-        """
-        self.safe_zones = []
-        self.danger_zones = []
-        
-        for x in range(21):
-            for y in range(21):
-                if self.global_map[x, y] != EMPTY:
-                    continue
-                
-                pos = (x, y)
-                safety_score = self._calculate_strategic_safety(pos)
-                
-                if safety_score > 50:
-                    self.safe_zones.append((pos, safety_score))
-                elif safety_score < 20:
-                    self.danger_zones.append((pos, safety_score))
-        
-        # Sort by safety score
-        self.safe_zones.sort(key=lambda x: x[1], reverse=True)
-        self.danger_zones.sort(key=lambda x: x[1])
-    
-    def _calculate_strategic_safety(self, pos):
-        """
-        Calculate long-term safety of position
-        NOT based on current Pacman position (proactive!)
-        """
-        x, y = pos
-        score = 0
-        
-        # 1. Structural safety (independent of Pacman)
-        exits = self._count_exits(pos)
-        score += exits * 15
-        
-        if exits <= 1:
-            score -= 100  # Dead ends always bad
-        
-        # 2. Wall coverage (occlusion potential)
-        adjacent_walls = sum(
-            1 for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]
-            if self._is_wall((x+dx, y+dy))
-        )
-        score += adjacent_walls * 10
-        
-        # 3. Depth in map (avoid edges)
-        depth = min(x, 20-x, y, 20-y)
-        score += depth * 3
-        
-        # 4. Connectivity (can reach many places)
-        reachable = len(self._flood_fill(pos, max_dist=4))
-        score += reachable * 0.5
-        
-        # 5. Check for nearby corners (tactical advantage)
-        nearby_corners = 0
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
-                check_pos = (x+dx, y+dy)
-                if self._is_valid_pos(check_pos) and self._is_corner(check_pos):
-                    nearby_corners += 1
-        score += nearby_corners * 5
-        
-        # 6. Open space penalty (exposed)
-        open_space = 0
-        for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
-            consecutive = 0
-            for step in range(1, 6):
-                check_pos = (x+dx*step, y+dy*step)
-                if not self._is_walkable(check_pos):
-                    break
-                consecutive += 1
-            open_space += consecutive
-        score -= open_space * 2
-        
-        return score
+        legal = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            nxt = self._apply(my_pos, move)
+            if self._walkable(nxt):
+                legal.append((move, nxt))
 
-    # =====================================================
-    # GOAL MANAGEMENT (PROACTIVE)
-    # =====================================================
-    def _is_goal_still_valid(self, my_pos, pacman_pos):
-        """
-        Check if current goal is still safe
-        PROACTIVE: Don't wait until we're in danger
-        """
-        if self.current_goal is None:
-            return False
-        
-        # If we reached goal, it's "invalid" (need new goal)
-        if my_pos == self.current_goal:
-            return False
-        
-        # If Pacman visible and close to goal, goal is compromised
-        if pacman_pos is not None:
-            goal_dist_to_pacman = abs(self.current_goal[0] - pacman_pos[0]) + \
-                                  abs(self.current_goal[1] - pacman_pos[1])
-            
-            if goal_dist_to_pacman < 4:
-                return False  # Goal too close to threat
-        
-        # If goal in danger zone (based on last known Pacman)
-        if self.last_seen_pacman is not None:
-            predicted_pacman = self._predict_pacman_position()
-            
-            goal_dist_to_predicted = abs(self.current_goal[0] - predicted_pacman[0]) + \
-                                     abs(self.current_goal[1] - predicted_pacman[1])
-            
-            if goal_dist_to_predicted < 5:
-                return False
-        
-        # If path is blocked
-        if self.planned_path:
-            if not self._is_walkable(self.planned_path[0]):
-                return False
-        
-        # Goal still valid if survived this long
-        if self.goal_validity_steps > 15:
-            return True
-        
-        return True
-    
-    def _create_new_goal(self, my_pos, pacman_pos, step_number):
-        """
-        Create new goal and plan path
-        PROACTIVE: Choose goal based on strategic value, not just immediate safety
-        """
-        # Emergency mode: Pacman very close
-        if pacman_pos is not None:
-            dist_to_pacman = abs(my_pos[0] - pacman_pos[0]) + abs(my_pos[1] - pacman_pos[1])
-            
-            if dist_to_pacman <= 4:
-                # EMERGENCY: Pick closest safe zone away from Pacman
-                self.current_goal = self._find_emergency_goal(my_pos, pacman_pos)
-            else:
-                # TACTICAL: Pick best strategic safe zone
-                self.current_goal = self._find_strategic_goal(my_pos, pacman_pos)
-        else:
-            # NO THREAT: Pick optimal long-term position
-            self.current_goal = self._find_optimal_position(my_pos)
-        
-        # Plan path to goal
-        if self.current_goal:
-            self.planned_path = self._plan_path(my_pos, self.current_goal)
-            self.path_step = 0
-    
-    def _find_emergency_goal(self, my_pos, pacman_pos):
-        """Emergency: find closest safe position away from Pacman"""
-        best_goal = None
-        best_score = -1e9
-        
-        # Check safe zones
-        for safe_pos, safety_score in self.safe_zones[:10]:
-            dist_to_me = abs(safe_pos[0] - my_pos[0]) + abs(safe_pos[1] - my_pos[1])
-            dist_to_pacman = abs(safe_pos[0] - pacman_pos[0]) + abs(safe_pos[1] - pacman_pos[1])
-            
-            # Want: close to me, far from Pacman
-            score = dist_to_pacman * 20 - dist_to_me * 5 + safety_score
-            
-            # Must be away from Pacman
-            if dist_to_pacman < 5:
-                continue
-            
-            if score > best_score:
-                best_score = score
-                best_goal = safe_pos
-        
-        return best_goal if best_goal else my_pos
-    
-    def _find_strategic_goal(self, my_pos, pacman_pos):
-        """Tactical: find best strategic position"""
-        best_goal = None
-        best_score = -1e9
-        
-        # Predict where Pacman will be
-        predicted_pacman = self._predict_pacman_position()
-        
-        for safe_pos, safety_score in self.safe_zones[:15]:
-            dist_to_me = abs(safe_pos[0] - my_pos[0]) + abs(safe_pos[1] - my_pos[1])
-            dist_to_predicted = abs(safe_pos[0] - predicted_pacman[0]) + \
-                               abs(safe_pos[1] - predicted_pacman[1])
-            
-            # Balance: strategic value, distance from predicted threat, reachability
-            score = safety_score * 2 + dist_to_predicted * 10 - dist_to_me * 2
-            
-            # Don't go too far
-            if dist_to_me > 10:
-                score -= 50
-            
-            if score > best_score:
-                best_score = score
-                best_goal = safe_pos
-        
-        return best_goal if best_goal else my_pos
-    
-    def _find_optimal_position(self, my_pos):
-        """No threat: find best long-term position"""
-        if self.safe_zones:
-            # Go to highest value safe zone within reasonable distance
-            for safe_pos, safety_score in self.safe_zones[:20]:
-                dist = abs(safe_pos[0] - my_pos[0]) + abs(safe_pos[1] - my_pos[1])
-                if dist <= 8:
-                    return safe_pos
-            
-            # Otherwise just pick best
-            return self.safe_zones[0][0]
-        
-        return my_pos
-    
-    def _predict_pacman_position(self):
-        """Predict Pacman's likely position"""
-        if self.last_seen_pacman is None:
-            return (10, 10)  # Center of map
-        
-        # Estimate based on time since seen
-        # Pacman could move 2 tiles/step on straights
-        max_movement = self.steps_since_seen * 2
-        
-        # Assume Pacman is searching (moving toward center or toward us)
-        # Simple heuristic: stays near last seen
-        return self.last_seen_pacman
-
-    # =====================================================
-    # PATH PLANNING & EXECUTION
-    # =====================================================
-    def _plan_path(self, start, goal):
-        """Plan path from start to goal using BFS (returns list of positions, not moves)"""
-        if start == goal:
-            return []
-        
-        queue = deque([(start, [start])])
-        visited = {start}
-        
-        max_iterations = 500
-        iterations = 0
-        
-        while queue and iterations < max_iterations:
-            iterations += 1
-            current, path = queue.popleft()
-            
-            if current == goal:
-                # Return path excluding start position
-                return path[1:]
-            
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                next_pos = self._apply_move(current, move)
-                
-                if not self._is_walkable(next_pos):
-                    continue
-                
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    queue.append((next_pos, path + [next_pos]))
-        
-        return []
-    
-    def _execute_plan(self, my_pos, pacman_pos):
-        """
-        Execute planned path
-        PROACTIVE: Follow plan unless emergency
-        """
-        # Emergency override: Pacman very close
-        if pacman_pos is not None:
-            dist = abs(my_pos[0] - pacman_pos[0]) + abs(my_pos[1] - pacman_pos[1])
-            if dist <= 2:
-                # EMERGENCY: Override plan
-                return self._emergency_escape(my_pos, pacman_pos)
-        
-        # Follow planned path (path is list of positions)
-        if self.planned_path and self.path_step < len(self.planned_path):
-            next_pos = self.planned_path[self.path_step]
-            
-            # Verify move is still valid
-            if self._is_walkable(next_pos):
-                # Calculate move direction from current to next position
-                move = self._get_move_to_position(my_pos, next_pos)
-                
-                if move is not None:
-                    self.path_step += 1
-                    return move
-            
-            # Path blocked or invalid, replan
-            self.current_goal = None
+        if not legal:
             return Move.STAY
         
-        # Reached goal or path exhausted
+        # === HARD TURN COMMITMENT ===
+        if self.last_move is not None:
+            turning_moves = [
+                (m, p) for m, p in legal
+                if self._is_turn_move(m) and p not in self.tabu_positions
+            ]
+
+            if turning_moves:
+                # ONLY consider turning moves
+                legal = turning_moves
+
+        # --- HARD TABU FILTER ---
+        non_tabu = [(m, p) for m, p in legal if p not in self.tabu_positions]
+        candidates = non_tabu if non_tabu else legal
+
+        # --- Tiering ---
+        turn_moves = []
+        intersection_moves = []
+        safe_moves = []
+        fallback_moves = []
+
+        for move, nxt in candidates:
+            if self._is_turn_tile(nxt):
+                turn_moves.append((move, nxt))
+            elif self._exits(nxt) >= 3:
+                intersection_moves.append((move, nxt))
+            elif not self._leads_to_long_corridor(nxt, move):
+                safe_moves.append((move, nxt))
+            else:
+                fallback_moves.append((move, nxt))
+
+        for tier in [turn_moves, intersection_moves, safe_moves, fallback_moves]:
+            if tier:
+                return self._score_and_choose(my_pos, pacman_pos, tier)
+
         return Move.STAY
-    
-    def _get_move_to_position(self, current_pos, target_pos):
-        """Get move direction from current to target position"""
-        dx = target_pos[0] - current_pos[0]
-        dy = target_pos[1] - current_pos[1]
-        
-        if dx == 1 and dy == 0:
-            return Move.DOWN
-        elif dx == -1 and dy == 0:
-            return Move.UP
-        elif dx == 0 and dy == 1:
-            return Move.RIGHT
-        elif dx == 0 and dy == -1:
-            return Move.LEFT
-        
-        return None
-    
-    def _emergency_escape(self, my_pos, pacman_pos):
-        """Emergency: immediate escape (reactive fallback)"""
+
+    # =====================================================
+    # SCORING
+    # =====================================================
+    def _score_and_choose(self, my_pos, pacman_pos, tier):
+
         best_move = Move.STAY
         best_score = -1e9
-        
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            new_pos = self._apply_move(my_pos, move)
-            if not self._is_walkable(new_pos):
-                continue
-            
-            # Distance from Pacman
-            dist = abs(new_pos[0] - pacman_pos[0]) + abs(new_pos[1] - pacman_pos[1])
-            
-            # Exits
-            exits = self._count_exits(new_pos)
-            
-            score = dist * 30 + exits * 10
-            
-            if exits <= 1:
-                score -= 200
-            
-            # Prefer perpendicular to Pacman's line
-            if new_pos[0] != pacman_pos[0] and new_pos[1] != pacman_pos[1]:
-                score += 50
-            
+
+        for move, nxt in tier:
+            score = 0
+
+            if (my_pos, move) in self.bad_directions:
+                score -= 80
+
+            if pacman_pos:
+                d0 = self._manhattan(my_pos, pacman_pos)
+                d1 = self._manhattan(nxt, pacman_pos)
+                score += (d1 - d0) * 30
+
+                if nxt[0] != pacman_pos[0] and nxt[1] != pacman_pos[1]:
+                    score += 25
+
+            score += self._exits(nxt) * 15
+
+            if nxt in self.recent_positions:
+                score -= 20
+
+            if self._leads_to_long_corridor(nxt, move):
+                score -= 60
+                self.bad_directions[(my_pos, move)] = 6
+
             if score > best_score:
                 best_score = score
                 best_move = move
-        
+
         return best_move
+
+    # =====================================================
+    # MAP
+    # =====================================================
+    def _update_map(self, obs):
+        for i in range(21):
+            for j in range(21):
+                if obs[i, j] != UNKNOWN:
+                    self.global_map[i, j] = obs[i, j]
+
+    def _decay_bad_directions(self):
+        for k in list(self.bad_directions.keys()):
+            self.bad_directions[k] -= 1
+            if self.bad_directions[k] <= 0:
+                del self.bad_directions[k]
+
+    # =====================================================
+    # STRUCTURE DETECTION
+    # =====================================================
+    def _is_turn_tile(self, pos):
+        if self._exits(pos) != 2:
+            return False
+        moves = [m for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+                 if self._walkable(self._apply(pos, m))]
+        dx1, dy1 = moves[0].value
+        dx2, dy2 = moves[1].value
+        return not (dx1 == -dx2 and dy1 == -dy2)
+
+    def _leads_to_long_corridor(self, start, move):
+        dx, dy = move.value
+        cur = start
+        for _ in range(10):
+            if not self._walkable(cur):
+                return False
+            if self._exits(cur) >= 3:
+                return False
+            cur = (cur[0] + dx, cur[1] + dy)
+        return True
 
     # =====================================================
     # HELPERS
     # =====================================================
-    def _apply_move(self, pos, move):
+    def _apply(self, pos, move):
         dx, dy = move.value
         return (pos[0] + dx, pos[1] + dy)
 
-    def _is_walkable(self, pos):
+    def _walkable(self, pos):
         x, y = pos
         if not (0 <= x < 21 and 0 <= y < 21):
             return False
         return self.global_map[x, y] == EMPTY
-    
-    def _is_valid_pos(self, pos):
-        x, y = pos
-        return 0 <= x < 21 and 0 <= y < 21
 
-    def _is_wall(self, pos):
-        x, y = pos
-        if not (0 <= x < 21 and 0 <= y < 21):
-            return True
-        return self.global_map[x, y] == WALL
+    def _exits(self, pos):
+        return sum(
+            self._walkable(self._apply(pos, m))
+            for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+        )
 
-    def _count_exits(self, pos):
-        count = 0
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            if self._is_walkable(self._apply_move(pos, move)):
-                count += 1
-        return count
-    
-    def _is_corner(self, pos):
-        """Check if position is a corner"""
-        if not self._is_walkable(pos):
+    def _manhattan(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _is_turn_move(self, move):
+        if self.last_move is None:
             return False
-        
-        exits = []
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            if self._is_walkable(self._apply_move(pos, move)):
-                exits.append(move)
-        
-        if len(exits) != 2:
-            return False
-        
-        # Check if perpendicular
-        dx1, dy1 = exits[0].value
-        dx2, dy2 = exits[1].value
-        return (dx1 == 0 and dy2 == 0) or (dy1 == 0 and dx2 == 0)
-    
-    def _flood_fill(self, start, max_dist):
-        """Flood fill to find reachable positions"""
-        visited = set([start])
-        queue = deque([(start, 0)])
-        
-        while queue:
-            pos, dist = queue.popleft()
-            if dist >= max_dist:
-                continue
-            
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                new_pos = self._apply_move(pos, move)
-                if new_pos not in visited and self._is_walkable(new_pos):
-                    visited.add(new_pos)
-                    queue.append((new_pos, dist + 1))
-        
-        return visited
+        dx1, dy1 = self.last_move.value
+        dx2, dy2 = move.value
+        return not (dx1 == dx2 and dy1 == dy2)
+
+
+
+
 
 # =====================================================
 # PACMAN AGENT (SEEK) - Fixed Oscillation Issues
