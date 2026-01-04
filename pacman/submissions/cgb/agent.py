@@ -237,7 +237,6 @@ class GhostAgent(BaseGhostAgent):
         dx2, dy2 = move.value
         return not (dx1 == dx2 and dy1 == dy2)
 
-
 # =====================================================
 # PACMAN AGENT (SEEK) — All Issues Fixed
 # =====================================================
@@ -453,13 +452,17 @@ class PacmanAgent(BasePacmanAgent):
                 if unknown_neighbors == 0:
                     continue
 
-                # Prefer closest frontier tiles with more unknown neighbors
+                # Calculate distance
                 dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
-                score = dist - unknown_neighbors * 5  # Lower is better
                 
-                # Small bonus for tiles not recently visited
+                # FIXED: Distance is primary, unknown neighbors is tiebreaker
+                # Lower distance = lower score = better
+                # More unknown neighbors = lower score = better (as tiebreaker)
+                score = dist * 100 - unknown_neighbors * 10
+                
+                # Penalty for recently visited tiles
                 if (x, y) in self.recent_positions:
-                    score += 3
+                    score += 50
 
                 if score < best_score:
                     best_score = score
