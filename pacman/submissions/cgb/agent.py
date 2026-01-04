@@ -242,53 +242,67 @@ class GhostAgent(BaseGhostAgent):
 
 
 # =====================================================
-# PACMAN AGENT (SEEK) - Fixed Oscillation Issues
+# PACMAN AGENT (SEEK) - Fixed for Limited Vision
 # =====================================================
 class PacmanAgent(BasePacmanAgent):
 
-    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         
-        # Memory
+        # Memory - persistent across limited vision
         self.global_map = np.full((21, 21), UNKNOWN, dtype=int)
         self.last_known_ghost = None
         self.ghost_history = []
+        self.ghost_last_seen_step = -999
         
         # Committed path and target
         self.committed_path = []
         self.target_position = None
         self.steps_on_current_path = 0
-        self.min_commitment_steps = 3  # Minimum steps before reconsidering
+        self.min_commitment_steps = 8  # Increased for limited vision
+        self.max_path_age = 20  # Increased path lifetime
+        
+        # Direction persistence to prevent oscillation
+        self.last_direction = None
+        self.direction_persistence = 0
+        self.min_direction_persistence = 4  # Stay in direction for at least 4 steps
         
     def step(self, map_state, my_position, enemy_position, step_number):
-        """Main decision logic with single decision point"""
+        """Main decision logic optimized for limited vision"""
         
-        # Update map
+        # Update map (only updates visible areas, preserves rest)
         self._update_global_map(map_state)
         
-        # Update Ghost tracking
+        # Update Ghost tracking with step tracking
+        ghost_visible_now = enemy_position is not None
         ghost_moved_significantly = False
-        if enemy_position is not None:
+        
+        if ghost_visible_now:
             if self.last_known_ghost is not None:
                 dist = abs(enemy_position[0] - self.last_known_ghost[0]) + \
                        abs(enemy_position[1] - self.last_known_ghost[1])
-                ghost_moved_significantly = dist > 3
+                # Only consider "significant" if ghost teleported or moved very far
+                ghost_moved_significantly = dist > 8
             
             self.last_known_ghost = enemy_position
+            self.ghost_last_seen_step = step_number
             self.ghost_history.append(enemy_position)
             if len(self.ghost_history) > 10:
                 self.ghost_history.pop(0)
         
-        # Check if we should replan
+        # Calculate ghost staleness
+        ghost_staleness = step_number - self.ghost_last_seen_step
+        
+        # Check if we should replan - much more conservative
         should_replan = (
             not self.committed_path or  # No current path
-            ghost_moved_significantly or  # Ghost moved significantly
-            self.steps_on_current_path >= 10 or  # Path is stale
-            (self.target_position and enemy_position and 
+            (ghost_visible_now and ghost_moved_significantly) or  # Ghost teleported
+            self.steps_on_current_path >= self.max_path_age or  # Path very stale
+            (ghost_visible_now and 
              self.target_position != enemy_position and
-             self.steps_on_current_path >= self.min_commitment_steps)  # Target changed
+             self.steps_on_current_path >= self.min_commitment_steps and
+             self.direction_persistence >= self.min_direction_persistence)  # Target changed AND we've been going this way long enough
         )
         
         # Continue on committed path if we shouldn't replan
@@ -299,13 +313,13 @@ class PacmanAgent(BasePacmanAgent):
         # Need to create new plan
         self.steps_on_current_path = 0
         
-        if enemy_position is not None:
+        if ghost_visible_now:
             # Direct pursuit
             self.target_position = enemy_position
             return self._create_pursuit_plan(my_position, enemy_position)
         
-        if self.last_known_ghost is not None:
-            # Search last known area
+        if self.last_known_ghost is not None and ghost_staleness < 30:
+            # Search last known area (if recent)
             self.target_position = self.last_known_ghost
             return self._create_search_plan(my_position, self.last_known_ghost)
         
@@ -316,11 +330,12 @@ class PacmanAgent(BasePacmanAgent):
     # ===== MAP UPDATE =====
     
     def _update_global_map(self, local_map):
-        """Merge observation into global memory"""
+        """Merge observation into global memory - preserves known areas outside vision"""
         for i in range(21):
             for j in range(21):
                 if local_map[i, j] != UNKNOWN:
                     self.global_map[i, j] = local_map[i, j]
+                # Key: Don't overwrite known areas with UNKNOWN from limited vision
     
     # ===== PLAN CREATION =====
     
@@ -337,7 +352,16 @@ class PacmanAgent(BasePacmanAgent):
     
     def _create_search_plan(self, my_pos, last_known):
         """Create search plan around last known position"""
-        # Find best search target in area
+        # Predict where ghost might be based on history
+        predicted_pos = self._predict_ghost_position(last_known)
+        
+        if predicted_pos:
+            path = self._astar(my_pos, predicted_pos)
+            if path and len(path) > 1:
+                self.committed_path = path[1:]
+                return self._execute_committed_path(my_pos)
+        
+        # Search around last known
         search_target = self._find_search_target(my_pos, last_known)
         
         if search_target:
@@ -358,16 +382,49 @@ class PacmanAgent(BasePacmanAgent):
                 self.committed_path = path[1:]
                 return self._execute_committed_path(my_pos)
         
+        # Continue in last direction if possible (prevent oscillation)
+        if self.last_direction and self.direction_persistence < 6:
+            steps = self._max_valid_steps(my_pos, self.last_direction, self.pacman_speed)
+            if steps > 0:
+                self.direction_persistence += 1
+                return (self.last_direction, steps)
+        
         # Random valid move as fallback
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             if self._is_valid_move(my_pos, move):
+                self.last_direction = move
+                self.direction_persistence = 1
                 return (move, 1)
         
         return (Move.STAY, 1)
     
+    def _predict_ghost_position(self, last_known):
+        """Predict ghost movement based on history"""
+        if len(self.ghost_history) < 2:
+            return last_known
+        
+        # Calculate average movement direction
+        dx_total, dy_total = 0, 0
+        for i in range(len(self.ghost_history) - 1):
+            curr = self.ghost_history[i]
+            next_pos = self.ghost_history[i + 1]
+            dx_total += next_pos[0] - curr[0]
+            dy_total += next_pos[1] - curr[1]
+        
+        # Predict 3-5 steps ahead
+        steps_ahead = 4
+        pred_x = last_known[0] + int(dx_total / len(self.ghost_history) * steps_ahead)
+        pred_y = last_known[1] + int(dy_total / len(self.ghost_history) * steps_ahead)
+        
+        # Clamp to map bounds
+        pred_x = max(0, min(20, pred_x))
+        pred_y = max(0, min(20, pred_y))
+        
+        return (pred_x, pred_y)
+    
     def _find_search_target(self, my_pos, last_known):
         """Find best position to search near last known ghost location"""
-        search_radius = 6
+        search_radius = 8  # Increased for limited vision
         best_score = -1
         best_target = None
         
@@ -378,7 +435,7 @@ class PacmanAgent(BasePacmanAgent):
                 if not (0 <= x < 21 and 0 <= y < 21):
                     continue
                 
-                if self.global_map[x, y] != EMPTY:
+                if self.global_map[x, y] == WALL:  # Allow UNKNOWN areas
                     continue
                 
                 # Score based on distance from last known and from Pacman
@@ -388,8 +445,8 @@ class PacmanAgent(BasePacmanAgent):
                 if dist_from_last > search_radius or dist_from_pacman == 0:
                     continue
                 
-                # Prefer positions slightly away from last known
-                score = 10 - dist_from_last - dist_from_pacman * 0.1
+                # Prefer positions in expanding circle from last known
+                score = 15 - dist_from_last - dist_from_pacman * 0.05
                 
                 if score > best_score:
                     best_score = score
@@ -412,7 +469,7 @@ class PacmanAgent(BasePacmanAgent):
                         and self.global_map[x+dx, y+dy] == UNKNOWN
                     )
                     
-                    if unknown_neighbors >= 2:
+                    if unknown_neighbors >= 1:  # Lowered threshold
                         dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
                         if dist < min_dist:
                             min_dist = dist
@@ -456,6 +513,12 @@ class PacmanAgent(BasePacmanAgent):
             self.committed_path = []
             return (Move.STAY, 1)
         
+        # Update direction tracking
+        if move_direction != self.last_direction:
+            self.direction_persistence = 0
+        self.last_direction = move_direction
+        self.direction_persistence += 1
+        
         # Count consecutive steps in same direction along path
         move_dx, move_dy = move_direction.value
         steps = 0
@@ -466,7 +529,9 @@ class PacmanAgent(BasePacmanAgent):
             
             # Check if path continues in same direction
             if i < len(self.committed_path) and self.committed_path[i] == expected_next:
-                if self._is_valid_position(expected_next):
+                # Don't invalidate path for UNKNOWN areas (trust our global map memory)
+                cell_value = self.global_map[expected_next[0], expected_next[1]]
+                if cell_value != WALL:  # Allow EMPTY or UNKNOWN
                     steps += 1
                     current_pos = expected_next
                 else:
@@ -484,14 +549,14 @@ class PacmanAgent(BasePacmanAgent):
     # ===== PATHFINDING =====
     
     def _astar(self, start, goal):
-        """A* pathfinding"""
+        """A* pathfinding - trusts global map memory"""
         from heapq import heappush, heappop
         
         frontier = []
         heappush(frontier, (0, start, [start]))
         visited = {start: 0}
         
-        max_iterations = 500  # Prevent infinite loops
+        max_iterations = 500
         iterations = 0
         
         while frontier and iterations < max_iterations:
@@ -540,6 +605,8 @@ class PacmanAgent(BasePacmanAgent):
         for move in moves_to_try:
             steps = self._max_valid_steps(start, move, self.pacman_speed)
             if steps > 0:
+                self.last_direction = move
+                self.direction_persistence = 1
                 return (move, steps)
         
         # Try all other moves
@@ -547,6 +614,8 @@ class PacmanAgent(BasePacmanAgent):
             if move not in moves_to_try:
                 steps = self._max_valid_steps(start, move, self.pacman_speed)
                 if steps > 0:
+                    self.last_direction = move
+                    self.direction_persistence = 1
                     return (move, steps)
         
         return (Move.STAY, 1)
@@ -560,11 +629,12 @@ class PacmanAgent(BasePacmanAgent):
         return self._is_valid_position(new_pos)
     
     def _is_valid_position(self, pos):
-        """Check if position is valid"""
+        """Check if position is valid - trusts global map"""
         x, y = pos
         if not (0 <= x < 21 and 0 <= y < 21):
             return False
-        return self.global_map[x, y] == EMPTY
+        # Trust our global map memory - treat UNKNOWN as potentially walkable
+        return self.global_map[x, y] != WALL
     
     def _max_valid_steps(self, pos, move, max_steps):
         """Calculate maximum valid steps in direction"""

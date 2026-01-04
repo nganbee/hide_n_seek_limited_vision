@@ -1,0 +1,24 @@
+{"step": 17, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 18, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 19, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 20, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 21, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 22, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 23, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 24, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 25, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 26, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 27, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 28, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "STAY", "context": "trapping"}
+{"step": 29, "ghost_pos": [9, 20], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT"], "chosen_move": "LEFT", "context": "exit_trap"}
+{"step": 30, "ghost_pos": [9, 19], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT", "RIGHT"], "chosen_move": "LEFT", "context": "exploration"}
+{"step": 31, "ghost_pos": [9, 18], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT", "RIGHT"], "chosen_move": "LEFT", "context": "exploration"}
+{"step": 32, "ghost_pos": [9, 17], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT", "RIGHT"], "chosen_move": "LEFT", "context": "exploration"}
+{"step": 33, "ghost_pos": [9, 16], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["LEFT", "RIGHT"], "chosen_move": "LEFT", "context": "exploration"}
+{"step": 34, "ghost_pos": [9, 15], "pacman_visible": false, "pacman_pos": null, "valid_moves": ["UP", "DOWN", "LEFT", "RIGHT"], "chosen_move": "UP", "context": "exploration"}
+{"move": "UP", "next_pos": [7, 15], "distance": 2, "score": -2219}
+{"move": "DOWN", "next_pos": [9, 15], "distance": 4, "score": -1354}
+{"chosen": "DOWN", "next_pos": [9, 15], "score": -1354, "safe": false}
+{"step": 35, "ghost_pos": [8, 15], "pacman_visible": true, "pacman_pos": [5, 15], "valid_moves": ["UP", "DOWN"], "chosen_move": "DOWN", "context": "momentum_escape"}
+{"step": 36, "ghost_pos": [9, 15], "pacman_visible": true, "pacman_pos": [7, 15], "valid_moves": ["UP", "DOWN", "LEFT", "RIGHT"], "chosen_move": "DOWN", "context": "panic_escape"}
+{"step": 37, "ghost_pos": [10, 15], "pacman_visible": true, "pacman_pos": [8, 15], "valid_moves": ["UP", "DOWN"], "chosen_move": "DOWN", "context": "panic_escape"}
