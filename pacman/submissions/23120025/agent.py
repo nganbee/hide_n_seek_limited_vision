@@ -294,7 +294,7 @@ class GhostAgent(BaseGhostAgent):
         self._load_parameters_from_weights()
         
         # --- CẤU HÌNH THAM SỐ (HARD-CODED hoặc từ JSON) ---
-        self.SURVIVAL_HORIZON = 12  # Nhìn trước 12 bước (Ghost 12 - Pacman 24)
+        self.SURVIVAL_HORIZON = 6  # Nhìn trước 6 bước (Ghost 6 - Pacman 12)
 
         # --- CẤU HÌNH ---
         self.params = {
@@ -595,6 +595,7 @@ class GhostAgent(BaseGhostAgent):
                 score += self.params["W_INERTIA"]
             
             score += self.direction_bias.get(move, 0)
+            score += self._escape_potential(next_pos) * 20
             candidates.append((score, move, next_pos))
             
             # LOG HEURISTIC
@@ -674,7 +675,9 @@ class GhostAgent(BaseGhostAgent):
                 # Nếu khoảng cách < Tầm với của Pacman -> Coi như chết (cho an toàn)
                 # Lưu ý: Đây là check "Worst Case" (Pacman đi xuyên tường). 
                 # Nếu qua được bài test này thì 100% sống.
-                if dist_to_pacman_origin <= (time + 1) * 2:
+                effective_reach = (time + 1) * 1.4  # thay vì 2
+                if dist_to_pacman_origin <= effective_reach:
+
                     continue # Nhánh này chết, bỏ qua
                 
                 # Nếu sống, thêm vào hàng đợi để check tiếp bước sau
@@ -900,7 +903,7 @@ class GhostAgent(BaseGhostAgent):
                     elif self.ghost_map[nr, nc] == 1:  # Là tường
                         walls += 1
                     elif self.ghost_map[nr, nc] == -1:  # Chưa nhìn thấy - coi như tường để an toàn
-                        walls += 1
+                        walls += 0.5
                 
                 if walls >= 3: 
                     self.dead_ends.add((r, c))
@@ -1126,3 +1129,13 @@ class GhostAgent(BaseGhostAgent):
         """Check if position is within map bounds"""
         r, c = pos
         return 0 <= r < self.map_size[0] and 0 <= c < self.map_size[1]
+    
+    def _escape_potential(self, pos):
+    # Đếm số ô trống trong bán kính 3
+        count = 0
+        for dr in range(-3,4):
+            for dc in range(-3,4):
+                p = (pos[0]+dr, pos[1]+dc)
+                if self._is_valid_coord(p):
+                    count += 1
+        return count
