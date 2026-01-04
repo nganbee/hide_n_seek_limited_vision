@@ -52,7 +52,7 @@ class PacmanAgent(BasePacmanAgent):
         super().__init__(**kwargs)
         self.name = "Pure A* Pacman (Fixed)"
         # Lấy tốc độ từ config, mặc định là 2
-        speed_conf = kwargs.get("pacman_speed", kwargs.get("pacman-speed", 2))
+        speed_conf = kwargs.get("pacman_speed", kwargs.get("pacman-speed", 1))
         self.pacman_speed = max(1, int(speed_conf))
         
         self.vision_range = 5
@@ -134,6 +134,12 @@ class PacmanAgent(BasePacmanAgent):
             desired_steps = 1
             if len(path) >= 2 and path[0] == path[1]:
                 desired_steps = 2
+            
+            elif len(path) == 1:
+                dr, dc = first_move.value
+                next_pos = (start[0] + dr * 2, start[1] + dc * 2)
+                if self._is_valid_position(next_pos, map_state):
+                    desired_steps = 2
             
             steps = self._max_valid_steps(start, first_move, map_state, desired_steps)
             return (first_move, steps)
