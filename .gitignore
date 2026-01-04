@@ -1,1 +1,7 @@
-.vs/
+.vscode
+__pycache__
+.vs
+
+testing.sh
+game_results.log
+result_summary.txt
