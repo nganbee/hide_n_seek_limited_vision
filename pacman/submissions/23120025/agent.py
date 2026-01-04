@@ -343,6 +343,7 @@ class GhostAgent(BaseGhostAgent):
         self.survival_time = 0
         self.escape_count = 0
         self.trap_success_count = 0
+        self.death_trap_count = 0  # Số lần gặp death trap
         self.current_step = 0  # Track current step number
         
         # --- LOGGING ---
@@ -409,33 +410,6 @@ class GhostAgent(BaseGhostAgent):
         
         target_pacman = self.last_known_enemy_pos
         
-        # LOG với performance metrics
-        log_entry = {
-            "step": step_num,
-            "ghost_pos": my_pos,
-            "pacman_visible": pacman_visible,
-            "pacman_pos": target_pacman,
-            "visible_area": self._get_visible_area(my_pos),
-            "performance": {
-                "survival_time": self.survival_time,
-                "escape_count": self.escape_count,
-                "trap_success_count": self.trap_success_count,
-                "risk_level": float(self.risk_map[my_pos]) if (self._is_in_bounds(my_pos) and self.risk_map is not None) else 0.0
-            }
-        }
-        self.log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        self.log_file.flush()
-        
-        # LOG GHOST MAP (chỉ lưu map cuối cùng, ghi đè các lần trước)
-        map_entry = {
-            "step": step_num,
-            "ghost_pos": my_pos,
-            "ghost_map": [self.ghost_map[i].tolist() for i in range(self.map_size[0])]
-        }
-        # Mở file ở chế độ write (ghi đè) để chỉ giữ lại dòng cuối cùng
-        with open("ghost_map.json", "w", encoding="utf-8") as f:
-            f.write(json.dumps(map_entry, ensure_ascii=False) + "\n")
-            
         # 4. EARLY GAME - Đứng yên hoặc chạy tới vùng an toàn
         if step_num <= self.EARLY_GAME_LIMIT:
             if not target_pacman:
@@ -466,8 +440,20 @@ class GhostAgent(BaseGhostAgent):
             # Thấy pacman -> Thoát khỏi vùng kẹt
             self.trapped_pos = None
             self.trapped_step = 0
-            # Chạy có tính toán sâu (Deep Check)
-            final_move = self._momentum_aware_escape(my_pos, target_pacman)
+            
+            distance = self._manhattan_distance(my_pos, target_pacman)
+            
+            # CRITICAL DISTANCE: Pacman cực gần -> panic escape  
+            if distance <= 2:  # Pacman chỉ cách 1-2 ô
+                valid_moves = self._get_valid_moves(my_pos)
+                final_move = self._panic_escape(my_pos, target_pacman, valid_moves)
+                if final_move is None:
+                    final_move = self._momentum_aware_escape(my_pos, target_pacman)
+                self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "panic_escape")
+            else:
+                # Chạy có tính toán sâu (Deep Check)
+                final_move = self._momentum_aware_escape(my_pos, target_pacman)
+                self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "momentum_escape")
         else:
             # Không thấy pacman - check logic kẹt với cải thiện
             is_in_trap = my_pos in self.dead_ends
@@ -476,6 +462,16 @@ class GhostAgent(BaseGhostAgent):
             should_emergency_escape = False
             if self.trapped_pos and (step_num - self.pacman_last_seen_step) <= 3:
                 should_emergency_escape = True
+            
+            # DEATH TRAP DETECTION: Pacman gần + ở dead-end = chết chắc
+            is_death_trap = False
+            if target_pacman and my_pos in self.dead_ends:
+                distance = self._manhattan_distance(my_pos, target_pacman)
+                # Pacman speed 2, Ghost speed 1 -> nếu Pacman <= 4 ô trong dead-end = chết
+                if distance <= 4:
+                    is_death_trap = True
+                    should_emergency_escape = True
+                    self.death_trap_count += 1
             
             if is_in_trap and not should_emergency_escape:
                 # Vào hoặc ở trong trap
@@ -492,22 +488,67 @@ class GhostAgent(BaseGhostAgent):
                     final_move = Move.STAY
                     if self.trapped_step == trap_duration - 1:  # Sắp thoát
                         self.trap_success_count += 1
+                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "trapping")
                 else:
                     # Thoát khỏi kẹt
                     self.trapped_pos = None
                     self.trapped_step = 0
                     final_move = self._smart_exploration(my_pos)
+                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "exit_trap")
             else:
-                # Không trong kẹt hoặc emergency escape
-                if should_emergency_escape:
+                # Emergency escape hoặc death trap -> RUN!
+                if should_emergency_escape or is_death_trap:
+                    self.escaped_from_trap = True
                     self.trapped_pos = None
-                    self.trapped_step = 0
-                
-                final_move = self._smart_exploration(my_pos)
-            
+                    self.trap_duration = 0
+                    self.escape_count += 1
+                    
+                    if is_death_trap:
+                        # PANIC MODE: Chạy theo hướng tốt nhất ngay lập tức
+                        valid_moves = self._get_valid_moves(my_pos)
+                        panic_action = self._panic_escape(my_pos, target_pacman, valid_moves)
+                        if panic_action:
+                            final_move = panic_action
+                        else:
+                            final_move = self._momentum_aware_escape(my_pos, target_pacman)
+                        self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "death_trap_escape")
+                    else:
+                        # Normal escape với deep safety check
+                        final_move = self._momentum_aware_escape(my_pos, target_pacman)
+                        self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "emergency_escape")
+                else:
+                    # Không trong emergency - normal exploration
+                    final_move = self._smart_exploration(my_pos)
+                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "exploration")
+        
         self.last_move = final_move
         return final_move
 
+    def _log_decision(self, step_num, my_pos, pacman_visible, target_pacman, final_move, context=""):
+        """Helper method để log decision"""
+        valid_moves = self._get_valid_moves(my_pos)
+        decision_log = {
+            "step": step_num,
+            "ghost_pos": my_pos,
+            "pacman_visible": pacman_visible,
+            "pacman_pos": target_pacman if pacman_visible else None,
+            "valid_moves": [m.name for m in valid_moves],
+            "chosen_move": final_move.name,
+            "context": context
+        }
+        self.log_file.write(json.dumps(decision_log, ensure_ascii=False) + "\n")
+        self.log_file.flush()
+        
+        # LOG GHOST MAP (chỉ lưu map cuối cùng, ghi đè các lần trước)
+        map_entry = {
+            "step": step_num,
+            "ghost_pos": my_pos,
+            "ghost_map": [self.ghost_map[i].tolist() for i in range(self.map_size[0])]
+        }
+        # Ghi đè file để chỉ giữ lại dòng cuối cùng
+        with open("../submissions/23120025/ghost_map.json", "w", encoding="utf-8") as f:
+            f.write(json.dumps(map_entry, ensure_ascii=False) + "\n")
+        
     def _update_ghost_map(self, my_pos, map_state):
         """
         Cập nhật bản đồ riêng của Ghost dựa trên tầm nhìn hình chữ thập (10 ô).
@@ -761,7 +802,12 @@ class GhostAgent(BaseGhostAgent):
             else: score -= visits * self.params["W_VISIT_PENALTY"]
             
             # Heavy penalty for dead ends
-            if next_pos in self.dead_ends: score -= 3000
+            if next_pos in self.dead_ends: 
+                score -= 3000
+                # EXTRA PENALTY nếu Pacman gần last known position
+                if (self.last_known_enemy_pos and 
+                    self._manhattan_distance(next_pos, self.last_known_enemy_pos) <= 6):
+                    score -= 2000  # Death trap avoidance
             
             # Bonus for moving toward exploration targets (frontier)
             if self.exploration_targets:
@@ -796,6 +842,38 @@ class GhostAgent(BaseGhostAgent):
                 best_score = score
                 best_move = move
         return best_move
+
+    def _panic_escape(self, my_pos, pacman_pos, legal_actions):
+        """Panic mode: Escape ngay lập tức khỏi death trap"""
+        if not pacman_pos:
+            return None
+            
+        best_action = None
+        max_distance = -1
+        
+        for action in legal_actions:
+            next_pos = self._get_next_pos(my_pos, action)
+            if self._is_valid_coord(next_pos):
+                # Tìm vị trí xa Pacman nhất và không phải dead-end
+                distance = self._manhattan_distance(next_pos, pacman_pos)
+                
+                # Bonus cho việc thoát khỏi dead-end
+                if next_pos not in self.dead_ends and my_pos in self.dead_ends:
+                    distance += 10  # Big bonus for escaping dead-end
+                
+                # Penalty cho việc vào dead-end khác
+                if next_pos in self.dead_ends:
+                    distance -= 5
+                
+                # Penalty cho việc đi về phía Pacman
+                if distance < self._manhattan_distance(my_pos, pacman_pos):
+                    distance -= 3
+                
+                if distance > max_distance:
+                    max_distance = distance
+                    best_action = action
+        
+        return best_action
 
     def _precompute_map_features(self):
         """
