@@ -9,12 +9,14 @@ def analyze_n_save(log_file, pac_name, ghost_name):
 
     total_matches = 0
     total_steps = 0
+    steps = []
 
     with open(log_file, "r") as file:
         for line in file:
             line = line.strip().split()
             
             result = line[0]
+            steps.append(line[1])
             
             if result == "pacman_wins":
                 result_dict[result] += 1
@@ -33,6 +35,8 @@ def analyze_n_save(log_file, pac_name, ghost_name):
     
     with open("result_summary.txt", "a") as file:
         file.write(f"Pacman: {pac_name:<10} || Ghost: {ghost_name:<10} || Pacman rate: {pacman_rate:>6} || Ghost rate: {ghost_rate:>6} || Avg step pac win: {total_steps/total_matches:>6.2f}\n")
+    with open("step_log.txt", "a") as file:
+        file.write(f"Pacman: {pac_name:<10} || Ghost: {ghost_name:<10} || Max step: {max(steps):>6} || Min step: {min(steps):>6}\n")
         
 if __name__ == "__main__":
     if len(sys.argv) < 4:
