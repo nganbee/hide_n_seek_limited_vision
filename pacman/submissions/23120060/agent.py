@@ -45,8 +45,8 @@ class PacmanAgent(BasePacmanAgent):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Pacman v8.0 (Speed Demon Compact)"
-        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 2)))
+        self.name = "Pacman"
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         
         self.map_size = (21, 21)
         self.global_map = np.full(self.map_size, -1)
