@@ -238,415 +238,444 @@ class GhostAgent(BaseGhostAgent):
         return not (dx1 == dx2 and dy1 == dy2)
 
 
-
-
-
 # =====================================================
-# PACMAN AGENT (SEEK) - Fixed for Limited Vision
+# PACMAN AGENT (SEEK) — All Issues Fixed
 # =====================================================
+
+from collections import deque
+import numpy as np
+
 class PacmanAgent(BasePacmanAgent):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        
-        # Memory - persistent across limited vision
+
+        # Persistent global memory
         self.global_map = np.full((21, 21), UNKNOWN, dtype=int)
+
+        # Ghost tracking
         self.last_known_ghost = None
         self.ghost_history = []
         self.ghost_last_seen_step = -999
-        
-        # Committed path and target
+
+        # Path commitment
         self.committed_path = []
         self.target_position = None
         self.steps_on_current_path = 0
-        self.min_commitment_steps = 8  # Increased for limited vision
-        self.max_path_age = 20  # Increased path lifetime
-        
-        # Direction persistence to prevent oscillation
+        self.max_path_age = 20
+
+        # Direction memory
         self.last_direction = None
         self.direction_persistence = 0
-        self.min_direction_persistence = 4  # Stay in direction for at least 4 steps
-        
+
+        # Search state
+        self.search_area_center = None
+        self.steps_in_search_area = 0
+        self.max_search_area_steps = 15
+        self.visited_in_search = set()
+
+        # Anti-oscillation memory
+        self.recent_positions = deque(maxlen=12)
+
+        # Cost shaping
+        self.REVISIT_PENALTY = 6
+        self.UNKNOWN_PENALTY = 3
+
+    # =====================================================
+    # MAIN STEP
+    # =====================================================
+
     def step(self, map_state, my_position, enemy_position, step_number):
-        """Main decision logic optimized for limited vision"""
-        
-        # Update map (only updates visible areas, preserves rest)
+
+        self.recent_positions.append(my_position)
         self._update_global_map(map_state)
-        
-        # Update Ghost tracking with step tracking
-        ghost_visible_now = enemy_position is not None
+
+        ghost_visible = enemy_position is not None
         ghost_moved_significantly = False
-        
-        if ghost_visible_now:
+
+        if ghost_visible:
+            # Check if ghost moved significantly
             if self.last_known_ghost is not None:
                 dist = abs(enemy_position[0] - self.last_known_ghost[0]) + \
                        abs(enemy_position[1] - self.last_known_ghost[1])
-                # Only consider "significant" if ghost teleported or moved very far
-                ghost_moved_significantly = dist > 8
+                ghost_moved_significantly = dist > 5
             
             self.last_known_ghost = enemy_position
             self.ghost_last_seen_step = step_number
             self.ghost_history.append(enemy_position)
-            if len(self.ghost_history) > 10:
-                self.ghost_history.pop(0)
-        
-        # Calculate ghost staleness
+            self.ghost_history = self.ghost_history[-10:]
+
+            # Clear search state when ghost found
+            self.search_area_center = None
+            self.steps_in_search_area = 0
+            self.visited_in_search.clear()
+
+        else:
+            # Track search progress
+            if self.search_area_center:
+                dist = abs(my_position[0] - self.search_area_center[0]) + \
+                       abs(my_position[1] - self.search_area_center[1])
+                if dist <= 10:
+                    self.steps_in_search_area += 1
+                    self.visited_in_search.add(my_position)
+                else:
+                    self.search_area_center = None
+                    self.steps_in_search_area = 0
+                    self.visited_in_search.clear()
+
         ghost_staleness = step_number - self.ghost_last_seen_step
+        stuck_searching = self.steps_in_search_area > self.max_search_area_steps
         
-        # Check if we should replan - much more conservative
+        # Check if ghost is dangerously close
+        ghost_is_close = False
+        if ghost_visible:
+            dist_to_ghost = abs(enemy_position[0] - my_position[0]) + \
+                           abs(enemy_position[1] - my_position[1])
+            ghost_is_close = dist_to_ghost <= 8  # Within 8 tiles
+
         should_replan = (
-            not self.committed_path or  # No current path
-            (ghost_visible_now and ghost_moved_significantly) or  # Ghost teleported
-            self.steps_on_current_path >= self.max_path_age or  # Path very stale
-            (ghost_visible_now and 
-             self.target_position != enemy_position and
-             self.steps_on_current_path >= self.min_commitment_steps and
-             self.direction_persistence >= self.min_direction_persistence)  # Target changed AND we've been going this way long enough
+            not self.committed_path or
+            self.steps_on_current_path >= self.max_path_age or
+            stuck_searching or
+            ghost_is_close or  # Always replan when ghost is nearby!
+            (ghost_visible and ghost_moved_significantly)
         )
-        
-        # Continue on committed path if we shouldn't replan
+
         if not should_replan and self.committed_path:
             self.steps_on_current_path += 1
             return self._execute_committed_path(my_position)
-        
-        # Need to create new plan
+
         self.steps_on_current_path = 0
-        
-        if ghost_visible_now:
-            # Direct pursuit
-            self.target_position = enemy_position
+
+        if ghost_visible:
             return self._create_pursuit_plan(my_position, enemy_position)
-        
-        if self.last_known_ghost is not None and ghost_staleness < 30:
-            # Search last known area (if recent)
-            self.target_position = self.last_known_ghost
-            return self._create_search_plan(my_position, self.last_known_ghost)
-        
-        # Explore systematically
-        self.target_position = None
+
+        if self.last_known_ghost and ghost_staleness < 30 and not stuck_searching:
+            if not self.search_area_center:
+                self.search_area_center = self.last_known_ghost
+            return self._create_search_plan(my_position)
+
         return self._create_exploration_plan(my_position)
-    
-    # ===== MAP UPDATE =====
-    
+
+    # =====================================================
+    # MAP UPDATE
+    # =====================================================
+
     def _update_global_map(self, local_map):
-        """Merge observation into global memory - preserves known areas outside vision"""
         for i in range(21):
             for j in range(21):
                 if local_map[i, j] != UNKNOWN:
                     self.global_map[i, j] = local_map[i, j]
-                # Key: Don't overwrite known areas with UNKNOWN from limited vision
-    
-    # ===== PLAN CREATION =====
-    
+
+    # =====================================================
+    # PLANNING
+    # =====================================================
+
     def _create_pursuit_plan(self, my_pos, ghost_pos):
-        """Create committed pursuit plan"""
         path = self._astar(my_pos, ghost_pos)
-        
         if path and len(path) > 1:
-            self.committed_path = path[1:]  # Exclude current position
+            self.committed_path = path[1:]
             return self._execute_committed_path(my_pos)
-        
-        # Fallback: greedy move
         return self._greedy_move(my_pos, ghost_pos)
-    
-    def _create_search_plan(self, my_pos, last_known):
-        """Create search plan around last known position"""
-        # Predict where ghost might be based on history
-        predicted_pos = self._predict_ghost_position(last_known)
-        
-        if predicted_pos:
-            path = self._astar(my_pos, predicted_pos)
+
+    def _create_search_plan(self, my_pos):
+        target = self._predict_ghost_position(self.last_known_ghost)
+        if target:
+            path = self._astar(my_pos, target)
             if path and len(path) > 1:
                 self.committed_path = path[1:]
                 return self._execute_committed_path(my_pos)
-        
-        # Search around last known
-        search_target = self._find_search_target(my_pos, last_known)
-        
-        if search_target:
-            path = self._astar(my_pos, search_target)
+
+        target = self._find_unvisited_search_target(my_pos)
+        if target:
+            path = self._astar(my_pos, target)
             if path and len(path) > 1:
                 self.committed_path = path[1:]
                 return self._execute_committed_path(my_pos)
-        
-        return self._greedy_move(my_pos, last_known)
-    
+
+        # Give up on this search area
+        self.steps_in_search_area = self.max_search_area_steps + 1
+        return self._create_exploration_plan(my_pos)
+
     def _create_exploration_plan(self, my_pos):
-        """Create systematic exploration plan"""
-        target = self._find_closest_unknown_cluster(my_pos)
+        # First priority: frontier tiles (adjacent to unknown)
+        target = self._find_frontier_tile(my_pos)
+        
+        if not target:
+            # No frontiers - map fully explored, search distant areas
+            target = self._find_farthest_empty_tile(my_pos)
         
         if target:
             path = self._astar(my_pos, target)
             if path and len(path) > 1:
                 self.committed_path = path[1:]
                 return self._execute_committed_path(my_pos)
-        
-        # Continue in last direction if possible (prevent oscillation)
-        if self.last_direction and self.direction_persistence < 6:
-            steps = self._max_valid_steps(my_pos, self.last_direction, self.pacman_speed)
-            if steps > 0:
-                self.direction_persistence += 1
-                return (self.last_direction, steps)
-        
-        # Random valid move as fallback
+
+        # Hard anti-jitter fallback - avoid recent positions
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             if self._is_valid_move(my_pos, move):
-                self.last_direction = move
-                self.direction_persistence = 1
+                dx, dy = move.value
+                nxt = (my_pos[0] + dx, my_pos[1] + dy)
+                if nxt not in self.recent_positions:
+                    return (move, 1)
+
+        # Last resort - just move anywhere valid
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(my_pos, move):
                 return (move, 1)
-        
+
         return (Move.STAY, 1)
-    
-    def _predict_ghost_position(self, last_known):
-        """Predict ghost movement based on history"""
-        if len(self.ghost_history) < 2:
-            return last_known
-        
-        # Calculate average movement direction
-        dx_total, dy_total = 0, 0
-        for i in range(len(self.ghost_history) - 1):
-            curr = self.ghost_history[i]
-            next_pos = self.ghost_history[i + 1]
-            dx_total += next_pos[0] - curr[0]
-            dy_total += next_pos[1] - curr[1]
-        
-        # Predict 3-5 steps ahead
-        steps_ahead = 4
-        pred_x = last_known[0] + int(dx_total / len(self.ghost_history) * steps_ahead)
-        pred_y = last_known[1] + int(dy_total / len(self.ghost_history) * steps_ahead)
-        
-        # Clamp to map bounds
-        pred_x = max(0, min(20, pred_x))
-        pred_y = max(0, min(20, pred_y))
-        
-        return (pred_x, pred_y)
-    
-    def _find_search_target(self, my_pos, last_known):
-        """Find best position to search near last known ghost location"""
-        search_radius = 8  # Increased for limited vision
-        best_score = -1
-        best_target = None
-        
-        for dx in range(-search_radius, search_radius + 1):
-            for dy in range(-search_radius, search_radius + 1):
-                x, y = last_known[0] + dx, last_known[1] + dy
-                
-                if not (0 <= x < 21 and 0 <= y < 21):
+
+    # =====================================================
+    # FRONTIER EXPLORATION
+    # =====================================================
+
+    def _find_frontier_tile(self, my_pos):
+        """Find closest empty tile adjacent to unknown areas"""
+        best_score = float('inf')
+        best = None
+
+        for x in range(21):
+            for y in range(21):
+                if self.global_map[x, y] != EMPTY:
                     continue
-                
-                if self.global_map[x, y] == WALL:  # Allow UNKNOWN areas
+
+                # Count unknown neighbors
+                unknown_neighbors = 0
+                for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < 21 and 0 <= ny < 21:
+                        if self.global_map[nx, ny] == UNKNOWN:
+                            unknown_neighbors += 1
+
+                if unknown_neighbors == 0:
                     continue
+
+                # Prefer closest frontier tiles with more unknown neighbors
+                dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
+                score = dist - unknown_neighbors * 5  # Lower is better
                 
-                # Score based on distance from last known and from Pacman
-                dist_from_last = abs(dx) + abs(dy)
-                dist_from_pacman = abs(x - my_pos[0]) + abs(y - my_pos[1])
-                
-                if dist_from_last > search_radius or dist_from_pacman == 0:
-                    continue
-                
-                # Prefer positions in expanding circle from last known
-                score = 15 - dist_from_last - dist_from_pacman * 0.05
-                
-                if score > best_score:
+                # Small bonus for tiles not recently visited
+                if (x, y) in self.recent_positions:
+                    score += 3
+
+                if score < best_score:
                     best_score = score
-                    best_target = (x, y)
-        
-        return best_target
-    
-    def _find_closest_unknown_cluster(self, my_pos):
-        """Find closest unknown area"""
-        min_dist = float('inf')
-        target = None
+                    best = (x, y)
+
+        return best
+
+    def _find_farthest_empty_tile(self, my_pos):
+        """Find empty tile farthest from current position"""
+        max_dist = 0
+        best = None
         
         for x in range(21):
             for y in range(21):
-                if self.global_map[x, y] == UNKNOWN:
-                    # Count unknown neighbors
-                    unknown_neighbors = sum(
-                        1 for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]
-                        if 0 <= x+dx < 21 and 0 <= y+dy < 21
-                        and self.global_map[x+dx, y+dy] == UNKNOWN
-                    )
+                if self.global_map[x, y] == EMPTY:
+                    dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
                     
-                    if unknown_neighbors >= 1:  # Lowered threshold
-                        dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
-                        if dist < min_dist:
-                            min_dist = dist
-                            target = (x, y)
+                    # Bonus for not being recently visited
+                    if (x, y) not in self.recent_positions:
+                        dist += 2
+                    
+                    if dist > max_dist:
+                        max_dist = dist
+                        best = (x, y)
         
-        return target
-    
-    # ===== PATH EXECUTION =====
-    
+        return best
+
+    # =====================================================
+    # A* PATHFINDING (ANTI-LOOP)
+    # =====================================================
+
+    def _astar(self, start, goal):
+        from heapq import heappush, heappop
+
+        frontier = []
+        heappush(frontier, (0, start, [start]))
+        visited = {start: 0}
+
+        max_iterations = 500
+        iterations = 0
+
+        while frontier and iterations < max_iterations:
+            iterations += 1
+            _, current, path = heappop(frontier)
+            
+            if current == goal:
+                return path
+
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dx, dy = move.value
+                neighbor = (current[0] + dx, current[1] + dy)
+
+                if not self._is_valid_position(neighbor):
+                    continue
+
+                g = len(path)
+
+                # Penalize revisiting recent positions
+                if neighbor in self.recent_positions:
+                    g += self.REVISIT_PENALTY
+
+                # Slight penalty for unknown tiles (prefer known safe paths)
+                if self.global_map[neighbor[0], neighbor[1]] == UNKNOWN:
+                    g += self.UNKNOWN_PENALTY
+
+                if neighbor not in visited or g < visited[neighbor]:
+                    visited[neighbor] = g
+                    h = abs(neighbor[0] - goal[0]) + abs(neighbor[1] - goal[1])
+                    heappush(frontier, (g + h, neighbor, path + [neighbor]))
+
+        return []
+
+    # =====================================================
+    # EXECUTION
+    # =====================================================
+
     def _execute_committed_path(self, my_pos):
-        """Execute committed path with proper multi-step handling"""
+        """Execute path with correct multi-step handling"""
         
-        if not self.committed_path:
-            return (Move.STAY, 1)
-        
-        # Remove any positions we've already reached
+        # Remove positions already reached
         while self.committed_path and self.committed_path[0] == my_pos:
             self.committed_path.pop(0)
-        
+
         if not self.committed_path:
             return (Move.STAY, 1)
-        
-        # Determine move direction from current position to next position
+
+        # Determine move direction
         next_pos = self.committed_path[0]
         dx = next_pos[0] - my_pos[0]
         dy = next_pos[1] - my_pos[1]
-        
-        # Find the move direction
-        move_direction = None
-        if dx > 0 and dy == 0:
-            move_direction = Move.DOWN
-        elif dx < 0 and dy == 0:
-            move_direction = Move.UP
-        elif dy > 0 and dx == 0:
-            move_direction = Move.RIGHT
-        elif dy < 0 and dx == 0:
-            move_direction = Move.LEFT
-        
-        if move_direction is None:
-            # Path is invalid, clear it
+
+        move = None
+        if dx == 1 and dy == 0:
+            move = Move.DOWN
+        elif dx == -1 and dy == 0:
+            move = Move.UP
+        elif dy == 1 and dx == 0:
+            move = Move.RIGHT
+        elif dy == -1 and dx == 0:
+            move = Move.LEFT
+
+        if move is None:
+            # Path is invalid
             self.committed_path = []
             return (Move.STAY, 1)
-        
-        # Update direction tracking
-        if move_direction != self.last_direction:
-            self.direction_persistence = 0
-        self.last_direction = move_direction
-        self.direction_persistence += 1
-        
-        # Count consecutive steps in same direction along path
-        move_dx, move_dy = move_direction.value
+
+        # Count consecutive steps in same direction
+        move_dx, move_dy = move.value
         steps = 0
         current_pos = my_pos
-        
+
         for i in range(min(len(self.committed_path), self.pacman_speed)):
             expected_next = (current_pos[0] + move_dx, current_pos[1] + move_dy)
             
-            # Check if path continues in same direction
+            # Verify path continues in same direction and is valid
             if i < len(self.committed_path) and self.committed_path[i] == expected_next:
-                # Don't invalidate path for UNKNOWN areas (trust our global map memory)
-                cell_value = self.global_map[expected_next[0], expected_next[1]]
-                if cell_value != WALL:  # Allow EMPTY or UNKNOWN
+                if self._is_valid_position(expected_next):
                     steps += 1
                     current_pos = expected_next
                 else:
                     break
             else:
                 break
-        
+
         steps = max(1, steps)
-        
-        # Remove consumed positions from path
         self.committed_path = self.committed_path[steps:]
         
-        return (move_direction, steps)
-    
-    # ===== PATHFINDING =====
-    
-    def _astar(self, start, goal):
-        """A* pathfinding - trusts global map memory"""
-        from heapq import heappush, heappop
+        return (move, steps)
+
+    # =====================================================
+    # HELPERS
+    # =====================================================
+
+    def _predict_ghost_position(self, last):
+        """Predict ghost position based on recent movement"""
+        if len(self.ghost_history) < 2:
+            return None
         
-        frontier = []
-        heappush(frontier, (0, start, [start]))
-        visited = {start: 0}
+        # Use last two positions to calculate velocity
+        dx = self.ghost_history[-1][0] - self.ghost_history[-2][0]
+        dy = self.ghost_history[-1][1] - self.ghost_history[-2][1]
         
-        max_iterations = 500
-        iterations = 0
+        # Predict 4 steps ahead
+        pred = (last[0] + dx * 4, last[1] + dy * 4)
+        pred = (max(0, min(20, pred[0])), max(0, min(20, pred[1])))
         
-        while frontier and iterations < max_iterations:
-            iterations += 1
-            f_cost, current, path = heappop(frontier)
-            
-            if current == goal:
-                return path
-            
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                dx, dy = move.value
-                neighbor = (current[0] + dx, current[1] + dy)
+        if self.global_map[pred[0], pred[1]] != WALL:
+            return pred
+        return None
+
+    def _find_unvisited_search_target(self, my_pos):
+        """Find unvisited position in search area"""
+        best = None
+        best_score = -float('inf')
+        
+        for dx in range(-8, 9):
+            for dy in range(-8, 9):
+                x = self.search_area_center[0] + dx
+                y = self.search_area_center[1] + dy
                 
-                if not self._is_valid_position(neighbor):
+                if not (0 <= x < 21 and 0 <= y < 21):
+                    continue
+                if self.global_map[x, y] == WALL:
+                    continue
+                if (x, y) in self.visited_in_search:
                     continue
                 
-                g_cost = len(path)
+                # Prefer closer positions
+                dist = abs(x - my_pos[0]) + abs(y - my_pos[1])
+                score = -dist
                 
-                if neighbor not in visited or g_cost < visited[neighbor]:
-                    visited[neighbor] = g_cost
-                    h_cost = abs(neighbor[0] - goal[0]) + abs(neighbor[1] - goal[1])
-                    f = g_cost + h_cost
-                    heappush(frontier, (f, neighbor, path + [neighbor]))
+                if score > best_score:
+                    best_score = score
+                    best = (x, y)
         
-        return []
-    
+        return best
+
+    def _is_valid_move(self, pos, move):
+        dx, dy = move.value
+        return self._is_valid_position((pos[0] + dx, pos[1] + dy))
+
+    def _is_valid_position(self, pos):
+        x, y = pos
+        return 0 <= x < 21 and 0 <= y < 21 and self.global_map[x, y] != WALL
+
+    def _max_valid_steps(self, pos, move, max_steps):
+        dx, dy = move.value
+        steps = 0
+        cur = pos
+        for _ in range(max_steps):
+            nxt = (cur[0] + dx, cur[1] + dy)
+            if not self._is_valid_position(nxt):
+                break
+            cur = nxt
+            steps += 1
+        return steps
+
     def _greedy_move(self, start, goal):
-        """Greedy movement towards goal"""
+        """Greedy move toward goal"""
         dx = goal[0] - start[0]
         dy = goal[1] - start[1]
         
-        # Prefer the axis with larger distance
-        moves_to_try = []
+        prefs = []
         if abs(dx) > abs(dy):
-            moves_to_try = [
-                Move.DOWN if dx > 0 else Move.UP,
-                Move.RIGHT if dy > 0 else Move.LEFT
-            ]
+            prefs.append(Move.DOWN if dx > 0 else Move.UP)
+            prefs.append(Move.RIGHT if dy > 0 else Move.LEFT)
         else:
-            moves_to_try = [
-                Move.RIGHT if dy > 0 else Move.LEFT,
-                Move.DOWN if dx > 0 else Move.UP
-            ]
-        
-        # Try preferred moves first
-        for move in moves_to_try:
-            steps = self._max_valid_steps(start, move, self.pacman_speed)
-            if steps > 0:
-                self.last_direction = move
-                self.direction_persistence = 1
-                return (move, steps)
-        
-        # Try all other moves
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            if move not in moves_to_try:
-                steps = self._max_valid_steps(start, move, self.pacman_speed)
-                if steps > 0:
-                    self.last_direction = move
-                    self.direction_persistence = 1
-                    return (move, steps)
-        
+            prefs.append(Move.RIGHT if dy > 0 else Move.LEFT)
+            prefs.append(Move.DOWN if dx > 0 else Move.UP)
+
+        for m in prefs:
+            if self._is_valid_move(start, m):
+                return (m, 1)
+
+        for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(start, m):
+                return (m, 1)
+
         return (Move.STAY, 1)
-    
-    # ===== HELPERS =====
-    
-    def _is_valid_move(self, pos, move):
-        """Check if move is valid"""
-        dx, dy = move.value
-        new_pos = (pos[0] + dx, pos[1] + dy)
-        return self._is_valid_position(new_pos)
-    
-    def _is_valid_position(self, pos):
-        """Check if position is valid - trusts global map"""
-        x, y = pos
-        if not (0 <= x < 21 and 0 <= y < 21):
-            return False
-        # Trust our global map memory - treat UNKNOWN as potentially walkable
-        return self.global_map[x, y] != WALL
-    
-    def _max_valid_steps(self, pos, move, max_steps):
-        """Calculate maximum valid steps in direction"""
-        steps = 0
-        current = pos
-        dx, dy = move.value
-        
-        for _ in range(max_steps):
-            next_pos = (current[0] + dx, current[1] + dy)
-            if not self._is_valid_position(next_pos):
-                break
-            steps += 1
-            current = next_pos
-        
-        return steps
