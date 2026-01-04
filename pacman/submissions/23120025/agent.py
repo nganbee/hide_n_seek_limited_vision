@@ -275,7 +275,6 @@ class GhostAgent(BaseGhostAgent):
     """
     
     # ========== DEFAULT TUNING CÁC THAM SỐ TẠI ĐÂY ==========
-    # Nếu có file weights.json sẽ override những giá trị này
     EARLY_GAME_LIMIT = 16       # Số bước đầu ưu tiên nấp (0-20)
     SAFE_DISTANCE = 5          # Khoảng cách an toàn (0-8)
     W_DISTANCE = 30            # Trọng số khoảng cách (20-60)
@@ -346,10 +345,6 @@ class GhostAgent(BaseGhostAgent):
         self.death_trap_count = 0  # Số lần gặp death trap
         self.current_step = 0  # Track current step number
         
-        # --- LOGGING ---
-        self.log_file = open("../submissions/23120025/ghost_log.json", "w", encoding="utf-8")  # Append mode để ghi tiếp
-        self.map_file = open("../submissions/23120025/ghost_map.json", "w", encoding="utf-8")  # Write mode để chỉ giữ map cuối
-
     def _load_parameters_from_weights(self):
         """Load parameters từ weights.json nếu tồn tại"""
         import json
@@ -449,11 +444,9 @@ class GhostAgent(BaseGhostAgent):
                 final_move = self._panic_escape(my_pos, target_pacman, valid_moves)
                 if final_move is None:
                     final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "panic_escape")
             else:
                 # Chạy có tính toán sâu (Deep Check)
                 final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "momentum_escape")
         else:
             # Không thấy pacman - check logic kẹt với cải thiện
             is_in_trap = my_pos in self.dead_ends
@@ -488,13 +481,11 @@ class GhostAgent(BaseGhostAgent):
                     final_move = Move.STAY
                     if self.trapped_step == trap_duration - 1:  # Sắp thoát
                         self.trap_success_count += 1
-                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "trapping")
                 else:
                     # Thoát khỏi kẹt
                     self.trapped_pos = None
                     self.trapped_step = 0
                     final_move = self._smart_exploration(my_pos)
-                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "exit_trap")
             else:
                 # Emergency escape hoặc death trap -> RUN!
                 if should_emergency_escape or is_death_trap:
@@ -511,43 +502,15 @@ class GhostAgent(BaseGhostAgent):
                             final_move = panic_action
                         else:
                             final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                        self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "death_trap_escape")
                     else:
                         # Normal escape với deep safety check
                         final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                        self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "emergency_escape")
                 else:
                     # Không trong emergency - normal exploration
                     final_move = self._smart_exploration(my_pos)
-                    self._log_decision(step_num, my_pos, pacman_visible, target_pacman, final_move, "exploration")
         
         self.last_move = final_move
         return final_move
-
-    def _log_decision(self, step_num, my_pos, pacman_visible, target_pacman, final_move, context=""):
-        """Helper method để log decision"""
-        valid_moves = self._get_valid_moves(my_pos)
-        decision_log = {
-            "step": step_num,
-            "ghost_pos": my_pos,
-            "pacman_visible": pacman_visible,
-            "pacman_pos": target_pacman if pacman_visible else None,
-            "valid_moves": [m.name for m in valid_moves],
-            "chosen_move": final_move.name,
-            "context": context
-        }
-        self.log_file.write(json.dumps(decision_log, ensure_ascii=False) + "\n")
-        self.log_file.flush()
-        
-        # LOG GHOST MAP (chỉ lưu map cuối cùng, ghi đè các lần trước)
-        map_entry = {
-            "step": step_num,
-            "ghost_pos": my_pos,
-            "ghost_map": [self.ghost_map[i].tolist() for i in range(self.map_size[0])]
-        }
-        # Ghi đè file để chỉ giữ lại dòng cuối cùng
-        with open("../submissions/23120025/ghost_map.json", "w", encoding="utf-8") as f:
-            f.write(json.dumps(map_entry, ensure_ascii=False) + "\n")
         
     def _update_ghost_map(self, my_pos, map_state):
         """
@@ -596,11 +559,6 @@ class GhostAgent(BaseGhostAgent):
             
             score += self.direction_bias.get(move, 0)
             candidates.append((score, move, next_pos))
-            
-            # LOG HEURISTIC
-            move_log = {"move": move.name, "next_pos": next_pos, "distance": d, "score": score}
-            self.log_file.write(json.dumps(move_log, ensure_ascii=False) + "\n")
-            self.log_file.flush()
 
         # Sắp xếp điểm cao nhất lên đầu
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -611,18 +569,12 @@ class GhostAgent(BaseGhostAgent):
         for score, move, next_pos in candidates[:3]:
             # Gọi hàm BFS check sâu
             if self._is_safe_deep_check(next_pos, pacman_pos):
-                chosen_log = {"chosen": move.name, "next_pos": next_pos, "score": score, "safe": True}
-                self.log_file.write(json.dumps(chosen_log, ensure_ascii=False) + "\n")
-                self.log_file.flush()
                 return move # Tìm thấy đường sống -> Đi ngay
             
         # Nếu cả 3 nước tốt nhất đều dẫn đến cái chết sau N bước -> Rất nguy hiểm
         # Fallback: Vẫn chọn nước có điểm Heuristic cao nhất (hy vọng Pacman sai lầm)
         if candidates:
             score, move, next_pos = candidates[0]
-            chosen_log = {"chosen": move.name, "next_pos": next_pos, "score": score, "safe": False}
-            self.log_file.write(json.dumps(chosen_log, ensure_ascii=False) + "\n")
-            self.log_file.flush()
             return move
             
         return Move.STAY
@@ -652,21 +604,6 @@ class GhostAgent(BaseGhostAgent):
             next_moves = self._get_valid_moves_coords(curr_pos)
             
             for next_pos in next_moves:
-                # KIỂM TRA TỬ THẦN:
-                # Tại thời điểm (time + 1), Ghost ở next_pos.
-                # Pacman đã di chuyển tổng cộng (time + 1) * 2 bước.
-                # Khoảng cách an toàn tối thiểu cần thiết = (time + 1) * 2
-                
-                # Tuy nhiên, tính chính xác Pacman đi đường nào rất khó (vì tường).
-                # Ta dùng "Vùng Nguy Hiểm Ước Lượng" (Conservative Estimate):
-                # Giả sử Pacman đi xuyên tường (hoặc đi tối ưu nhất) để bắt mình.
-                # Nếu khoảng cách Manhattan hiện tại > Tốc độ đuổi của Pacman -> Sống.
-                
-                # Pacman Speed 2 thu hẹp khoảng cách tối đa 1 ô mỗi lượt (Nó đi 2, mình đi 1 -> Net = 1)
-                # Vậy sau t lượt, Pacman gần thêm t ô.
-                # Điều kiện sống: Dist_Ban_Dau - t > 1 (để không bị bắt)
-                
-                # Cách kiểm tra chặt chẽ hơn:
                 # Tính khoảng cách thực tế tới Pacman tại vị trí gốc
                 dist_to_pacman_origin = self._manhattan_distance(next_pos, pacman_pos)
                 
@@ -768,14 +705,6 @@ class GhostAgent(BaseGhostAgent):
                 best_score = score
                 best_move = move
             
-            # LOG EXPLORATION
-            move_log = {"move": move.name, "next_pos": next_pos, "distance": 0, "score": score, "mode": "exploration"}
-            self.log_file.write(json.dumps(move_log, ensure_ascii=False) + "\n")
-            self.log_file.flush()
-        
-        chosen_log = {"chosen": best_move.name, "mode": "exploration", "safe": True}
-        self.log_file.write(json.dumps(chosen_log, ensure_ascii=False) + "\n")
-        self.log_file.flush()
         
         return best_move
 
