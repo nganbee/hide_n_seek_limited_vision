@@ -360,14 +360,14 @@ Examples:
     parser.add_argument(
         '--capture-distance',
         type=int,
-        default=1,
+        default=2,
         help='Pacman captures Ghost when Manhattan distance is below this value'
     )
 
     parser.add_argument(
         '--pacman-speed',
         type=int,
-        default=1,
+        default=2,
         help='Maximum tiles Pacman can advance in the same direction when on a straight path'
     )
 
