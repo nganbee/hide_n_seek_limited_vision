@@ -44,11 +44,11 @@ WALL = 1
 
 
 class PacmanAgent(BasePacmanAgent):
-    """Pacman v8.0 Compact - Speed Demon Optimized"""
+    """Pacman v10.0 - Sequential Patrol Strategy"""
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Pacman"
+        self.name = "Pacman_Sequential_Patrol"
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         
         self.map_size = (21, 21)
@@ -57,7 +57,30 @@ class PacmanAgent(BasePacmanAgent):
         self.enemy_history = deque(maxlen=5)
         self.my_history = deque(maxlen=15) 
         self.current_target = None
-        self.ghost_probability = np.zeros((21, 21))
+        
+        # Mode tracking
+        self.pursuit_mode = False  # True when Ghost is visible
+        self.turns_since_lost_sight = 0  # Track how long since we last saw Ghost
+        self.PURSUIT_PERSISTENCE = 8  # Continue pursuit for 8 turns after losing sight
+        self.VISION_RADIUS = 5  # Maximum vision range (no obstacles, Manhattan distance)
+        
+        # Sequential patrol system - just track current target index
+        self.current_target_index = 0
+        
+        # Pre-defined strategic target positions (patrol route)
+        # Pacman will visit these positions sequentially
+        self.TARGET_POSITIONS = [
+            (9, 15),
+            (13, 11),
+            (9, 5),
+            (5,12), #most-seen
+            (15,11),
+            (2, 15),    # Top-left corner area
+            (2, 5),   # Top-right corner area
+            (9, 10),  # Center of map
+            (20, 5),   # Bottom-left corner area
+            (20, 15),  # Bottom-right corner area
+        ]
 
     def step(self, map_state: np.ndarray, my_position: tuple, enemy_position: tuple, step_number: int):
         # Update map and history
@@ -69,49 +92,82 @@ class PacmanAgent(BasePacmanAgent):
         if self.my_history.count(my_position) >= 3:
             return self._escape_loop(my_position)
         
-        # Set target - prioritize direct chase when enemy is visible
+        # ==================== MODE SWITCHING ====================
         if enemy_position:
+            # PURSUIT MODE: Ghost is visible
+            self.pursuit_mode = True
+            self.turns_since_lost_sight = 0
             self.last_known_enemy_pos = enemy_position
             self.enemy_history.append(enemy_position)
+            
             dist = self._manhattan_distance(my_position, enemy_position)
+            #print(f"[PURSUIT MODE] Ghost at {enemy_position}, dist={dist}")
             
-            self.ghost_probability.fill(0)
-            self.ghost_probability[enemy_position] = 1.0    
-            
-            # Direct axis-aligned chase strategy
+            # Direct axis-aligned chase with speed=2 advantage
             if self._on_same_axis(my_position, enemy_position):
-                # Same row or column - direct pursuit
                 straight_move, steps = self._get_straight_advantage(my_position, enemy_position)
                 if straight_move and steps > 0:
                     return (straight_move, steps)
             
-            if dist <= 1:
+            # Range-based strategy (optimized for vision_radius=5)
+            if dist <= 2:
+                # Close range: direct aggressive pursuit
                 self.current_target = enemy_position
             elif dist <= 3:
-                self.current_target = self._corner_cut(my_position, enemy_position) or enemy_position
+                # Medium range: try interception
+                intercept = self._calculate_interception(my_position, enemy_position)
+                self.current_target = intercept or enemy_position
+            elif dist <= self.VISION_RADIUS:
+                # Max vision range: predict + corner cutting
+                corner_target = self._corner_cut(my_position, enemy_position)
+                if corner_target:
+                    self.current_target = corner_target
+                else:
+                    self.current_target = self._smart_predict(my_position, enemy_position)
             else:
-                self.current_target = self._predict_target(my_position, enemy_position)
+                # Beyond vision: shouldn't happen, but predict anyway
+                self.current_target = self._smart_predict(my_position, enemy_position)
         else:
-            self.current_target = self.last_known_enemy_pos
+            # Ghost not visible - check if we should persist pursuit
+            self.turns_since_lost_sight += 1
             
-            new_prob = np.zeros_like(self.ghost_probability)
-            for r in range(21):
-                for c in range(21):
-                    if self.ghost_probability[r, c] > 0:
-                        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                            nr, nc = self._get_next_pos((r, c), move)
-                            if self._is_passable((nr, nc)):
-                                new_prob[nr, nc] += self.ghost_probability[r, c] * 0.25
-            self.ghost_probability = new_prob
+            if self.pursuit_mode and self.turns_since_lost_sight <= self.PURSUIT_PERSISTENCE:
+                # PERSISTENT PURSUIT: Continue chasing last known position
+                if self.last_known_enemy_pos:
+                    dist_to_last = self._manhattan_distance(my_position, self.last_known_enemy_pos)
+                    
+                    if dist_to_last <= 2:
+                        # Reached last known position - search nearby
+                        self.current_target = self._search_nearby(my_position, self.last_known_enemy_pos)
+                    else:
+                        # Still moving to last known position
+                        self.current_target = self.last_known_enemy_pos
+                else:
+                    # No last known position, switch to patrol
+                    self.pursuit_mode = False
+            else:
+                # Give up pursuit - switch to SEARCH MODE (patrol)
+                if self.pursuit_mode:
+                    print(f"[PURSUIT END] Lost Ghost, returning to patrol")
+                self.pursuit_mode = False
             
-        if not enemy_position:
-            idx = np.unravel_index(self.ghost_probability.argmax(), self.ghost_probability.shape)
-            if self.ghost_probability[idx] > 0:
-                self.current_target = idx
+            # Get current target from sequence
+            current_target = self.TARGET_POSITIONS[self.current_target_index]
+            
+            # Check if we reached the current target
+            if my_position == current_target or self._manhattan_distance(my_position, current_target) <= 1:
+                # Move to next target in sequence immediately
+                self.current_target_index = (self.current_target_index + 1) % len(self.TARGET_POSITIONS)
+                current_target = self.TARGET_POSITIONS[self.current_target_index]
+                #print(f"[PATROL] ✓ Reached target! at Step {step_number} Next: {current_target} ({self.current_target_index + 1}/{len(self.TARGET_POSITIONS)})")
+            
+            self.current_target = current_target
+            
+            #print(f"[PATROL] Target {self.current_target_index + 1}/{len(self.TARGET_POSITIONS)}: {current_target}")
 
-        # Move with speed optimization
+        # ==================== MOVEMENT EXECUTION ====================
         if self.current_target:
-            # Try straight line with speed=2
+            # Try straight line with speed optimization
             straight_move, steps = self._get_straight_advantage(my_position, self.current_target)
             if straight_move and steps > 0:
                 return (straight_move, steps)
@@ -123,14 +179,14 @@ class PacmanAgent(BasePacmanAgent):
                 if steps > 0:
                     return (next_move, steps)
 
-        # Explore
+        # Explore unexplored areas
         frontier_move = self._find_frontier(my_position)
         if frontier_move:
             steps = self._max_steps(my_position, frontier_move)
             if steps > 0:
                 return (frontier_move, steps)
 
-        # Fallback: always return a valid random move
+        # Fallback: random move
         return self._random_move(my_position)
 
     def _escape_loop(self, pos):
@@ -164,7 +220,8 @@ class PacmanAgent(BasePacmanAgent):
             return best_target
         return None
 
-    def _predict_target(self, my_pos, ghost_pos):
+    def _smart_predict(self, my_pos, ghost_pos):
+        """Smart prediction based on Ghost behavior patterns (Parkour AI)"""
         if len(self.enemy_history) < 2:
             return ghost_pos
         
@@ -175,15 +232,115 @@ class PacmanAgent(BasePacmanAgent):
             prev = self.enemy_history[-i-1]
             recent_moves.append((curr[0] - prev[0], curr[1] - prev[1]))
         
-        # Predict positions
         candidates = [ghost_pos]
+        
+        # 1. Linear extrapolation (default prediction)
         for dr, dc in recent_moves:
-            for steps in range(1, 4):
+            for steps in range(1, 5):  # Look further ahead
                 pred_pos = (ghost_pos[0] + dr*steps, ghost_pos[1] + dc*steps)
                 if self._is_passable(pred_pos):
                     candidates.append(pred_pos)
         
+        # 2. Predict toward opposite sector (Ghost Parkour behavior)
+        # Ghost tends to move away from Pacman toward opposite map sector
+        mid_r, mid_c = 10, 10
+        if my_pos[0] < mid_r:
+            target_r = mid_r + 5  # Move toward bottom
+        else:
+            target_r = mid_r - 5  # Move toward top
+        
+        if my_pos[1] < mid_c:
+            target_c = mid_c + 5  # Move toward right
+        else:
+            target_c = mid_c - 5  # Move toward left
+        
+        opposite_sector = (target_r, target_c)
+        
+        # 3. Predict positions between ghost and opposite sector
+        dr_sector = 1 if opposite_sector[0] > ghost_pos[0] else -1 if opposite_sector[0] < ghost_pos[0] else 0
+        dc_sector = 1 if opposite_sector[1] > ghost_pos[1] else -1 if opposite_sector[1] < ghost_pos[1] else 0
+        
+        for steps in range(1, 4):
+            sector_pred = (ghost_pos[0] + dr_sector*steps, ghost_pos[1] + dc_sector*steps)
+            if self._is_passable(sector_pred):
+                candidates.append(sector_pred)
+        
+        # 4. Predict toward high-mobility areas (intersections)
+        # Ghost prefers open areas with multiple exits
+        for candidate in list(candidates):
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                nearby = self._get_next_pos(candidate, move)
+                if self._is_passable(nearby):
+                    exits = sum(1 for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT] 
+                               if self._is_passable(self._get_next_pos(nearby, m)))
+                    if exits >= 3:  # Intersection
+                        candidates.append(nearby)
+        
+        # Choose best candidate: closest to Pacman for interception
         return min(candidates, key=lambda p: self._manhattan_distance(my_pos, p))
+    
+    def _calculate_interception(self, my_pos, ghost_pos):
+        """Calculate optimal interception point"""
+        # Find positions where Pacman can arrive before or same time as Ghost
+        # considering Pacman speed=2 and Ghost speed=1
+        
+        best_intercept = None
+        min_ghost_escape = float('inf')
+        
+        # Check positions around ghost (within 4 steps)
+        for dr in range(-4, 5):
+            for dc in range(-4, 5):
+                if abs(dr) + abs(dc) > 4:  # Skip far positions
+                    continue
+                
+                intercept_pos = (ghost_pos[0] + dr, ghost_pos[1] + dc)
+                if not self._is_passable(intercept_pos):
+                    continue
+                
+                # Time for Pacman to reach (with speed=2)
+                pacman_dist = self._manhattan_distance(my_pos, intercept_pos)
+                pacman_time = (pacman_dist + 1) // 2  # Round up, speed=2
+                
+                # Time for Ghost to reach (speed=1)
+                ghost_dist = self._manhattan_distance(ghost_pos, intercept_pos)
+                ghost_time = ghost_dist
+                
+                # Count Ghost escape routes from this position
+                escape_count = sum(1 for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+                                 if self._is_passable(self._get_next_pos(intercept_pos, m)))
+                
+                # Prefer positions where:
+                # 1. Pacman arrives before Ghost
+                # 2. Fewer escape routes for Ghost
+                if pacman_time <= ghost_time:
+                    score = escape_count + ghost_dist * 0.1  # Prefer closer + fewer escapes
+                    if score < min_ghost_escape:
+                        min_ghost_escape = score
+                        best_intercept = intercept_pos
+        
+        return best_intercept
+    
+    def _search_nearby(self, my_pos, center_pos):
+        """Search positions near last known Ghost location"""
+        # Expand search in spiral pattern
+        search_positions = []
+        for radius in range(1, 4):
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    if abs(dr) + abs(dc) == radius:  # Manhattan circle
+                        search_pos = (center_pos[0] + dr, center_pos[1] + dc)
+                        if self._is_passable(search_pos):
+                            # Prefer high-mobility positions (where Ghost might hide)
+                            exits = sum(1 for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+                                      if self._is_passable(self._get_next_pos(search_pos, m)))
+                            search_positions.append((search_pos, exits))
+        
+        if search_positions:
+            # Sort by: 1) more exits (likely hiding spots), 2) closer to Pacman
+            search_positions.sort(key=lambda x: (-x[1], self._manhattan_distance(my_pos, x[0])))
+            return search_positions[0][0]
+        
+        return center_pos
 
     def _get_straight_advantage(self, start_pos, target_pos):
         dr = target_pos[0] - start_pos[0]
@@ -265,6 +422,170 @@ class PacmanAgent(BasePacmanAgent):
         return (Move.STAY, 1)
 
     # Helper methods
+    def _update_ghost_probability(self, my_position):
+        """
+        Advanced probability propagation considering Ghost behavior patterns.
+        Ghost prefers: corners, dead-ends, areas far from Pacman, breaking LOS.
+        """
+        new_prob = np.zeros_like(self.ghost_probability)
+        
+        for r in range(21):
+            for c in range(21):
+                if self.ghost_probability[r, c] <= 0.001:
+                    continue  # Skip negligible probabilities
+                
+                current_prob = self.ghost_probability[r, c]
+                valid_moves = []
+                
+                # Check all possible Ghost moves
+                for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                    nr, nc = self._get_next_pos((r, c), move)
+                    if self._is_passable((nr, nc)):
+                        # Calculate move preference based on Ghost behavior
+                        move_weight = self._calculate_ghost_move_preference(
+                            (r, c), (nr, nc), my_position
+                        )
+                        valid_moves.append(((nr, nc), move_weight))
+                
+                if not valid_moves:
+                    # Ghost stuck (shouldn't happen in valid map)
+                    new_prob[r, c] += current_prob
+                    continue
+                
+                # Normalize weights
+                total_weight = sum(w for _, w in valid_moves)
+                
+                # Distribute probability according to move preferences
+                for (nr, nc), weight in valid_moves:
+                    new_prob[nr, nc] += current_prob * (weight / total_weight)
+        
+        # Normalize to ensure sum = 1.0
+        total = new_prob.sum()
+        if total > 0:
+            self.ghost_probability = new_prob / total
+        else:
+            # No valid distribution, reset to uniform
+            self.ghost_probability = np.ones((21, 21)) / (21 * 21)
+    
+    def _calculate_ghost_move_preference(self, from_pos, to_pos, pacman_pos):
+        """
+        Calculate how likely Ghost is to move from from_pos to to_pos.
+        Higher weight = more likely move for Ghost.
+        """
+        weight = 1.0  # Base weight
+        
+        # 1. Prefer moving away from Pacman
+        old_dist = self._manhattan_distance(from_pos, pacman_pos)
+        new_dist = self._manhattan_distance(to_pos, pacman_pos)
+        if new_dist > old_dist:
+            weight *= 2.0  # Strongly prefer moving away
+        elif new_dist < old_dist:
+            weight *= 0.3  # Penalize moving toward Pacman
+        
+        # 2. Prefer corners and dead-ends (Ghost hiding behavior)
+        walls_around = self._count_walls_around(to_pos)
+        if walls_around >= 3:
+            weight *= 1.5  # Dead-end preference
+        elif walls_around == 2:
+            weight *= 1.2  # Corner preference
+        
+        # 3. Prefer positions that break line of sight
+        if not self._has_line_of_sight(to_pos, pacman_pos):
+            weight *= 1.8  # Strong preference for hiding
+        
+        return weight
+    
+    def _decay_visible_probabilities(self, map_state, my_position):
+        """
+        Reduce probabilities in areas we can currently see (Ghost is not there).
+        """
+        for r in range(21):
+            for c in range(21):
+                if map_state[r, c] != -1:  # We can see this cell
+                    # Dramatically reduce probability here
+                    self.ghost_probability[r, c] *= 0.01
+        
+        # Normalize after decay
+        total = self.ghost_probability.sum()
+        if total > 0.001:
+            self.ghost_probability /= total
+        else:
+            # If all probabilities decayed to near-zero, reset to uniform over unseen areas
+            unseen_mask = (map_state == -1) & (self.global_map != 1)
+            unseen_count = unseen_mask.sum()
+            if unseen_count > 0:
+                self.ghost_probability = unseen_mask.astype(float) / unseen_count
+            else:
+                self.ghost_probability = np.ones((21, 21)) / (21 * 21)
+    
+    def _find_best_probability_target(self, my_position):
+        """
+        Find the best target position based on both probability and reachability.
+        Don't just go to highest probability - consider distance and accessibility.
+        """
+        # Find top probability positions
+        flat_probs = self.ghost_probability.flatten()
+        top_indices = np.argsort(flat_probs)[-10:][::-1]  # Top 10 positions
+        
+        best_target = None
+        best_score = -1
+        
+        for idx in top_indices:
+            pos = np.unravel_index(idx, self.ghost_probability.shape)
+            prob = self.ghost_probability[pos]
+            
+            if prob < 0.001:
+                break  # No more significant probabilities
+            
+            # Calculate composite score: probability / distance
+            dist = self._manhattan_distance(my_position, pos)
+            if dist == 0:
+                dist = 1
+            
+            # Score = probability * reachability_factor
+            # Closer positions get higher scores
+            reachability = 1.0 / (1.0 + dist / 10.0)
+            score = prob * reachability
+            
+            if score > best_score:
+                best_score = score
+                best_target = pos
+        
+        return best_target
+    
+    def _count_walls_around(self, pos):
+        """Count number of walls adjacent to position"""
+        count = 0
+        for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+            r, c = pos[0] + dr, pos[1] + dc
+            if not self._is_in_bounds((r, c)) or self.global_map[r, c] == 1:
+                count += 1
+        return count
+    
+    def _has_line_of_sight(self, pos1, pos2):
+        """Check if there's a clear line of sight between two positions"""
+        r1, c1 = pos1
+        r2, c2 = pos2
+        
+        # Check horizontal line of sight
+        if r1 == r2:
+            c_start, c_end = (c1, c2) if c1 < c2 else (c2, c1)
+            for c in range(c_start + 1, c_end):
+                if self.global_map[r1, c] == 1:
+                    return False
+            return True
+        
+        # Check vertical line of sight
+        if c1 == c2:
+            r_start, r_end = (r1, r2) if r1 < r2 else (r2, r1)
+            for r in range(r_start + 1, r_end):
+                if self.global_map[r, c1] == 1:
+                    return False
+            return True
+        
+        return False  # Not on same axis
+    
+    # Helper methods (existing)
     def _on_same_axis(self, pos1, pos2):
         """Check if two positions are on the same row or column"""
         return pos1[0] == pos2[0] or pos1[1] == pos2[1]
@@ -302,6 +623,7 @@ class PacmanAgent(BasePacmanAgent):
             steps += 1
             curr = next_p
         return steps
+    
 
 import numpy as np
 import random
@@ -310,791 +632,253 @@ import json
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 
+
 class GhostAgent(BaseGhostAgent):
     """
-    Ghost Agent - Heuristic Pro + Lookahead Safety Check
-    - Vẫn giữ nền tảng Heuristic thông minh (nhanh, mượt).
-    - Thêm lớp bảo vệ: Nhìn trước 1 lượt (Ghost đi 1, Pacman lao tới 2) để loại bỏ nước đi tử thần.
+    Ghost (Hider) Agent - Goal: Avoid being caught
     """
-    
-    # ========== DEFAULT TUNING CÁC THAM SỐ TẠI ĐÂY ==========
-    EARLY_GAME_LIMIT = 16       # Số bước đầu ưu tiên nấp (0-20)
-    SAFE_DISTANCE = 5          # Khoảng cách an toàn (0-8)
-    W_DISTANCE = 30            # Trọng số khoảng cách (20-60)
-    W_AXIS_PENALTY = 1474      # Phạt cùng trục (1000-3000)
-    W_CORNER_PENALTY = 810    # Phạt góc (500-1500)
-    W_DEAD_END_BAD = 12072      # Phạt ngõ cụt (5000-15000)
-    W_VISIT_PENALTY = 719      # Phạt ô cũ (100-800)
-    W_INERTIA = 93             # Quán tính (20-100)
-    BASE_TRAP_DURATION = 10    # Base duration trong kẹt (3-20)
-    # ===============================================
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.name = "Parkour_Ghost"
         
-        # Load parameters từ weights.json nếu có
-        self._load_parameters_from_weights()
+        # State & Memory
+        self.history = deque(maxlen=4)
+        self.last_known_pacman = None
+        self.turns_since_seen = 0
         
-        # --- CẤU HÌNH THAM SỐ (HARD-CODED hoặc từ JSON) ---
-        self.SURVIVAL_HORIZON = 12  # Nhìn trước 12 bước (Ghost 12 - Pacman 24)
+        # CHIẾN THUẬT KHAI CUỘC (Ambush)
+        self.opening_target = None
+        self.opening_moves = [] 
+        self.sectors = {}
+        
+        # TRẠNG THÁI
+        self.in_opening_phase = True
+        self.in_camping_phase = False 
 
-        # --- CẤU HÌNH ---
-        self.params = {
-            "EARLY_GAME_LIMIT": self.EARLY_GAME_LIMIT,
-            "SAFE_DISTANCE": self.SAFE_DISTANCE,
-            "W_DISTANCE": self.W_DISTANCE,
-            "W_AXIS_PENALTY": self.W_AXIS_PENALTY,
-            "W_CORNER_PENALTY": self.W_CORNER_PENALTY,
-            "W_DEAD_END_BAD": self.W_DEAD_END_BAD,
-            "W_VISIT_PENALTY": self.W_VISIT_PENALTY,
-            "W_INERTIA": self.W_INERTIA,
-            "BASE_TRAP_DURATION": self.BASE_TRAP_DURATION   # Base duration trong kẹt
-        }
+    def step(self, map_state: np.ndarray, 
+             my_position: tuple, 
+             enemy_position: tuple,
+             step_number: int) -> Move:
         
-        # --- DATA ---
-        self.map_size = None
-        self.ghost_map = None  # Bản đồ cá nhân của Ghost (-1 = chưa nhìn thấy, 1 = tường, 0 = trống)
-        self.walls = None
-        self.dead_ends = None
-        self.corners = None
-        self.visit_map = None
-        self.last_known_enemy_pos = None
-        self.last_move = None
+        height, width = map_state.shape
         
-        self.direction_bias = {Move.UP: 5, Move.DOWN: 0, Move.LEFT: 5, Move.RIGHT: 6}
-        
-        # --- TRAPPING LOGIC ---
-        self.trapped_pos = None  # Vị trí kẹt
-        self.trapped_step = 0     # Số bước đã ở trong kẹt
-        
-        
-        # --- PATTERN RECOGNITION ---
-        self.pacman_history = deque(maxlen=10)  # Track Pacman positions
-        self.pacman_last_seen_step = 0
-        
-        # --- EXPLORATION ---
-        self.exploration_targets = []  # Frontier cells to explore
-        self.last_frontier_update = 0
-        
-        # --- MEMORY DECAY & RISK ASSESSMENT ---
-        self.cell_last_seen = {}  # Track when each cell was last seen
-        self.risk_map = None  # Will be initialized when map_size is known
-        self.pacman_activity_zones = []  # Vùng Pacman hoạt động thường xuyên
-        
-        # --- PERFORMANCE TRACKING ---
-        self.survival_time = 0
-        self.escape_count = 0
-        self.trap_success_count = 0
-        self.death_trap_count = 0  # Số lần gặp death trap
-        self.current_step = 0  # Track current step number
-        
-    def _load_parameters_from_weights(self):
-        """Load parameters từ weights.json nếu tồn tại"""
-        import json
-        from pathlib import Path
-        
-        weights_path = Path(__file__).parent / "weights.json"
-        if weights_path.exists():
-            try:
-                with open(weights_path, 'r') as f:
-                    weights = json.load(f)
+        # Setup động (Dynamic Setup) cho lần gọi đầu tiên để thích ứng mọi map
+        if not self.sectors:
+            self.sectors = {
+                'TR': (height // 4, width * 3 // 4),
+                'TL': (height // 4, width // 4),
+                'BL': (height * 3 // 4, width // 4),
+                'BR': (height * 3 // 4, width * 3 // 4)
+            }
+            # Mặc định góc phục kích theo tỷ lệ map, nếu bị vướng tường thì lấy vị trí hiện tại
+            ambush_spot = (5, 12)
+            if ambush_spot[0] < height and ambush_spot[1] < width and map_state[ambush_spot[0], ambush_spot[1]] != 1:
+                self.opening_target = ambush_spot
+            else:
+                self.opening_target = my_position # Bỏ qua phase mở đầu nếu vị trí lỗi
+                self.in_opening_phase = False
+                self.in_camping_phase = True
                 
-                # Override class attributes với values từ file
-                for param in ["GHOST_OBS_RADIUS", "PACMAN_OBS_RADIUS", "EARLY_GAME_LIMIT", 
-                             "SAFE_DISTANCE", "W_DISTANCE", "W_AXIS_PENALTY", 
-                             "W_CORNER_PENALTY", "W_DEAD_END_BAD", "W_VISIT_PENALTY", "W_INERTIA"]:
-                    if param in weights:
-                        setattr(self, param, weights[param])
-            except Exception as e:
-                pass  # Nếu lỗi, dùng default values
-
-    def step(self, map_state, my_pos, enemy_pos, step_num):
-        # Store current step for use in other methods
-        self.current_step = step_num
-        
-        # 1. PRE-COMPUTE
-        if self.walls is None:
-            self.map_size = map_state.shape
-            self.ghost_map = np.full(self.map_size, -1, dtype=np.int8)  # -1 = chưa nhìn thấy
-            self.walls = (map_state == 1)
-            self.visit_map = np.zeros(self.map_size)
-            self.risk_map = np.zeros(self.map_size)  # Initialize risk map here
-            self._precompute_map_features()
-        
-        # 2. CẬP NHẬT BẢN ĐỒ RIÊNG (Chỉ nhìn thấy hình chữ thập 5 ô)
-        self._update_ghost_map(my_pos, map_state)
-        # Cập nhật lại map features sau khi có thông tin mới
-        self._precompute_map_features()
-        # Update memory decay và risk assessment
-        self._update_memory_and_risk(my_pos, step_num)
-        
-        self.visit_map[my_pos] += 1
-        self.survival_time = step_num
-        
-        # 3. UPDATE PACMAN
-        pacman_visible = enemy_pos is not None
-        if pacman_visible:
-            self.last_known_enemy_pos = enemy_pos
-            self.pacman_history.append((enemy_pos, step_num))
-            self.pacman_last_seen_step = step_num
-            self._update_pacman_activity_zones(enemy_pos)
+        # --- 0. BÁO ĐỘNG ĐỎ ---
+        if enemy_position is not None:
+            if self.in_opening_phase or self.in_camping_phase:
+                self.in_opening_phase = False
+                self.in_camping_phase = False
             
-            # Performance tracking
-            if self.trapped_pos:  # Escape từ trap thành công
-                self.escape_count += 1
+            self.last_known_pacman = enemy_position
+            self.turns_since_seen = 0
         else:
-            # Pacman không thấy - có thể vừa escape khỏi tầm nhìn hay bị capture
-            pass
-        
-        target_pacman = self.last_known_enemy_pos
-        
-        # 4. EARLY GAME - Đứng yên hoặc chạy tới vùng an toàn
-        if step_num <= self.EARLY_GAME_LIMIT:
-            if not target_pacman:
-                # Pacman không thấy -> Đứng yên an toàn
-                return Move.RIGHT
-            
-            distance = self._manhattan_distance(my_pos, target_pacman)
-            if distance > self.SAFE_DISTANCE:
-                # Đã ở vùng an toàn -> Đứng yên
+            self.turns_since_seen += 1
+
+        if self.last_known_pacman is None:
+            self.last_known_pacman = (height // 2, width // 2)
+
+        # --- PHASE 1: OPENING ---
+        if self.in_opening_phase:
+            if my_position == self.opening_target:
+                self.in_opening_phase = False
+                self.in_camping_phase = True
                 return Move.STAY
             else:
-                # Pacman gần -> Chạy tới vùng an toàn (khoảng cách > SAFE_DISTANCE)
-                valid_moves = self._get_valid_moves(my_pos)
-                best_move = Move.STAY
-                best_dist = distance
+                if not self.opening_moves:
+                    self.opening_moves = self._bfs_path(my_position, self.opening_target, map_state)
                 
-                for move in valid_moves:
-                    next_pos = self._get_next_pos(my_pos, move)
-                    next_dist = self._manhattan_distance(next_pos, target_pacman)
-                    if next_dist > best_dist:
-                        best_dist = next_dist
-                        best_move = move
-                
-                return best_move
-        
-        # 5. MAIN LOGIC
-        if target_pacman:
-            # Thấy pacman -> Thoát khỏi vùng kẹt
-            self.trapped_pos = None
-            self.trapped_step = 0
-            
-            distance = self._manhattan_distance(my_pos, target_pacman)
-            
-            # CRITICAL DISTANCE: Pacman cực gần -> panic escape  
-            if distance <= 2:  # Pacman chỉ cách 1-2 ô
-                valid_moves = self._get_valid_moves(my_pos)
-                final_move = self._panic_escape(my_pos, target_pacman, valid_moves)
-                if final_move is None:
-                    final_move = self._momentum_aware_escape(my_pos, target_pacman)
-            else:
-                # Chạy có tính toán sâu (Deep Check)
-                final_move = self._momentum_aware_escape(my_pos, target_pacman)
-        else:
-            # Không thấy pacman - check logic kẹt với cải thiện
-            is_in_trap = my_pos in self.dead_ends
-            
-            # Emergency escape: Nếu đang trap mà Pacman gần đây xuất hiện
-            should_emergency_escape = False
-            if self.trapped_pos and (step_num - self.pacman_last_seen_step) <= 3:
-                should_emergency_escape = True
-            
-            # DEATH TRAP DETECTION: Pacman gần + ở dead-end = chết chắc
-            is_death_trap = False
-            if target_pacman and my_pos in self.dead_ends:
-                distance = self._manhattan_distance(my_pos, target_pacman)
-                # Pacman speed 2, Ghost speed 1 -> nếu Pacman <= 4 ô trong dead-end = chết
-                if distance <= 4:
-                    is_death_trap = True
-                    should_emergency_escape = True
-                    self.death_trap_count += 1
-            
-            if is_in_trap and not should_emergency_escape:
-                # Vào hoặc ở trong trap
-                if self.trapped_pos != my_pos:
-                    self.trapped_pos = my_pos
-                    self.trapped_step = 0
-                
-                self.trapped_step += 1
-                
-                # Dynamic trap duration dựa trên khoảng cách tới last known Pacman
-                trap_duration = self._calculate_dynamic_trap_duration(target_pacman)
-                
-                if self.trapped_step < trap_duration:
-                    final_move = Move.STAY
-                    if self.trapped_step == trap_duration - 1:  # Sắp thoát
-                        self.trap_success_count += 1
-                else:
-                    # Thoát khỏi kẹt
-                    self.trapped_pos = None
-                    self.trapped_step = 0
-                    final_move = self._smart_exploration(my_pos)
-            else:
-                # Emergency escape hoặc death trap -> RUN!
-                if should_emergency_escape or is_death_trap:
-                    self.escaped_from_trap = True
-                    self.trapped_pos = None
-                    self.trap_duration = 0
-                    self.escape_count += 1
-                    
-                    if is_death_trap:
-                        # PANIC MODE: Chạy theo hướng tốt nhất ngay lập tức
-                        valid_moves = self._get_valid_moves(my_pos)
-                        panic_action = self._panic_escape(my_pos, target_pacman, valid_moves)
-                        if panic_action:
-                            final_move = panic_action
-                        else:
-                            final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                    else:
-                        # Normal escape với deep safety check
-                        final_move = self._momentum_aware_escape(my_pos, target_pacman)
-                else:
-                    # Không trong emergency - normal exploration
-                    final_move = self._smart_exploration(my_pos)
-        
-        self.last_move = final_move
-        return final_move
-        
-    def _update_ghost_map(self, my_pos, map_state):
-        """
-        Cập nhật bản đồ riêng của Ghost dựa trên tầm nhìn hình chữ thập (10 ô).
-        Tầm nhìn bán kính 5: nhìn thấy ±5 ô theo mỗi hướng chính (UP, DOWN, LEFT, RIGHT).
-        """
-        r, c = my_pos
-        h, w = self.map_size
-        
-        # Cập nhật vị trí hiện tại
-        self.ghost_map[r, c] = map_state[r, c]
-        
-        # Cập nhật 4 hướng chính (chữ thập), mỗi hướng radius 5
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            for dist in range(1, 6):  # 1 đến 5 bước theo hướng
-                nr, nc = r + dr*dist, c + dc*dist
-                if 0 <= nr < h and 0 <= nc < w:
-                    self.ghost_map[nr, nc] = map_state[nr, nc]
+                if self.opening_moves:
+                    next_move = self.opening_moves.pop(0)
+                    if next_move:
+                        dr, dc = next_move.value
+                        self.history.append((my_position[0]+dr, my_position[1]+dc))
+                        return next_move
+                self.in_opening_phase = False 
 
-    # =========================================================================
-    # LOGIC NÉ ĐÒN VỚI TẦM NHÌN SÂU (BFS SURVIVAL)
-    # =========================================================================
+        # --- PHASE 2: CAMPING ---
+        if self.in_camping_phase:
+            return Move.STAY
 
-    def _momentum_aware_escape(self, my_pos, pacman_pos):
-        valid_moves = self._get_valid_moves(my_pos)
-        if not valid_moves: return Move.STAY
+        # --- PHASE 3: ACTIVE EVASION (PARKOUR STYLE) ---
+        pacman_dist_map = self._get_bfs_distance_map(self.last_known_pacman, map_state)
         
-        candidates = []
-        on_highway = self._is_on_same_axis(my_pos, pacman_pos)
-        
-        # BƯỚC 1: Lọc bằng Heuristic (Nhanh)
-        for move in valid_moves:
-            next_pos = self._get_next_pos(my_pos, move)
-            score = 0
-            
-            d = self._manhattan_distance(next_pos, pacman_pos)
-            score += d * self.params["W_DISTANCE"]
-            
-            # Phạt nặng địa hình xấu
-            if next_pos in self.dead_ends: score -= self.params["W_DEAD_END_BAD"]
-            if next_pos in self.corners:   score -= self.params["W_CORNER_PENALTY"]
-            if self._is_on_same_axis(next_pos, pacman_pos): score -= self.params["W_AXIS_PENALTY"]
-            
-            if self.last_move and move == self.last_move and not on_highway:
-                score += self.params["W_INERTIA"]
-            
-            score += self.direction_bias.get(move, 0)
-            candidates.append((score, move, next_pos))
+        # 2. Tìm điểm an toàn nhất (xa Pacman nhất theo đường đi thực tế)
+        target_pos = my_position
+        max_dist = -1
+        for pos, dist in pacman_dist_map.items():
+            if dist > max_dist:
+                max_dist = dist
+                target_pos = pos
 
-        # Sắp xếp điểm cao nhất lên đầu
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        # BƯỚC 2: Kiểm tra sinh tồn chiều sâu (Chậm hơn nên chỉ check Top 3)
-        # Chỉ cần tìm được 1 nước đi trong Top 3 mà sống sót được qua 12 bước là CHỐT luôn.
-        
-        for score, move, next_pos in candidates[:3]:
-            # Gọi hàm BFS check sâu
-            if self._is_safe_deep_check(next_pos, pacman_pos):
-                return move # Tìm thấy đường sống -> Đi ngay
-            
-        # Nếu cả 3 nước tốt nhất đều dẫn đến cái chết sau N bước -> Rất nguy hiểm
-        # Fallback: Vẫn chọn nước có điểm Heuristic cao nhất (hy vọng Pacman sai lầm)
-        if candidates:
-            score, move, next_pos = candidates[0]
-            return move
-            
-        return Move.STAY
+        # 3. Chấm điểm nước đi dựa trên khoảng cách thực tế (truyền thêm pacman_dist_map)
+        best_move = self._evaluate_best_move(my_position, self.last_known_pacman, target_pos, map_state, pacman_dist_map)
+        if best_move is None: best_move = Move.STAY
 
-    def _is_safe_deep_check(self, start_node, pacman_pos):
-        """
-        Dùng BFS để kiểm tra: Liệu từ start_node, Ghost có thể sống sót
-        trong self.SURVIVAL_HORIZON bước tiếp theo không?
-        """
-        # Hàng đợi BFS: (Vị trí Ghost, Thời gian t)
-        queue = deque([(start_node, 1)])
-        visited = set([(start_node, 1)]) # Visited theo (pos, time) để cho phép quay đầu nếu cần
-        
-        initial_pacman_dist = self._manhattan_distance(start_node, pacman_pos)
-        
-        # Nếu ngay bước đầu đã bị bắt -> False
-        if initial_pacman_dist <= 2: return False 
+        # Anti-stuck
+        if best_move == Move.STAY and self.turns_since_seen < 5:
+             valid = self._get_valid_neighbors(my_position, map_state)
+             candidates = [n for n in valid if n not in self.history]
+             if candidates:
+                 next_pos = random.choice(candidates)
+                 dr, dc = next_pos[0]-my_position[0], next_pos[1]-my_position[1]
+                 for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                     if m.value == (dr, dc): return m
 
+        dr, dc = best_move.value
+        self.history.append((my_position[0]+dr, my_position[1]+dc))
+        return best_move
+
+    # --- HELPER METHODS ---
+    
+    def _get_bfs_distance_map(self, start_pos, map_state):
+        """Trả về một dictionary chứa khoảng cách thực tế từ start_pos đến mọi ô"""
+        distances = {start_pos: 0}
+        queue = [start_pos]
+        
         while queue:
-            curr_pos, time = queue.popleft()
+            curr = queue.pop(0)
+            dist = distances[curr]
             
-            # Nếu đã sống sót đủ lâu (vượt qua Horizon) -> Nước đi này AN TOÀN
-            if time >= self.SURVIVAL_HORIZON:
-                return True
-            
-            # Mở rộng các nước đi tiếp theo của Ghost
-            next_moves = self._get_valid_moves_coords(curr_pos)
-            
-            for next_pos in next_moves:
-                # Tính khoảng cách thực tế tới Pacman tại vị trí gốc
-                dist_to_pacman_origin = self._manhattan_distance(next_pos, pacman_pos)
-                
-                # Pacman có thể đi tối đa (time + 1) * 2 bước.
-                # Nếu khoảng cách < Tầm với của Pacman -> Coi như chết (cho an toàn)
-                # Lưu ý: Đây là check "Worst Case" (Pacman đi xuyên tường). 
-                # Nếu qua được bài test này thì 100% sống.
-                if dist_to_pacman_origin <= (time + 1) * 2:
-                    continue # Nhánh này chết, bỏ qua
-                
-                # Nếu sống, thêm vào hàng đợi để check tiếp bước sau
-                state = (next_pos, time + 1)
-                if state not in visited:
-                    visited.add(state)
-                    queue.append(state)
-        
-        # Nếu đi hết tất cả các nhánh mà không nhánh nào chạm mốc Horizon -> Chết chắc
+            for nr, nc in self._get_valid_neighbors(curr, map_state):
+                if (nr, nc) not in distances:
+                    distances[(nr, nc)] = dist + 1
+                    queue.append((nr, nc))
+        return distances
+
+    def _get_valid_neighbors(self, pos, map_state):
+        r, c = pos
+        height, width = map_state.shape
+        valid = []
+        for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            nr, nc = r + m.value[0], c + m.value[1]
+            if 0 <= nr < height and 0 <= nc < width and map_state[nr, nc] != 1:
+                valid.append((nr, nc))
+        return valid
+
+    def _has_line_of_sight(self, p1, p2, map_state):
+        r1, c1 = p1
+        r2, c2 = p2
+        if r1 == r2:
+            step = 1 if c2 > c1 else -1
+            for c in range(c1 + step, c2, step):
+                if map_state[r1, c] == 1: return False
+            return True
+        if c1 == c2:
+            step = 1 if r2 > r1 else -1
+            for r in range(r1 + step, r2, step):
+                if map_state[r, c1] == 1: return False
+            return True
         return False
 
-    def _check_future_safety(self, ghost_future_pos, pacman_current_pos):
-        """
-        Giả lập Pacman Speed 2 đuổi theo Ghost.
-        Trả về True nếu Ghost còn sống sau lượt này, False nếu chết.
-        """
-        # 1. Pacman bước 1 (Greedy về phía Ghost)
-        p_step_1 = self._predict_pacman_greedy(pacman_current_pos, ghost_future_pos)
-        if p_step_1 == ghost_future_pos: return False # Bị bắt ngay bước 1
+    def _bfs_path(self, start, target, map_state):
+        if start == target: return []
+        queue = [(start, [])]
+        visited = {start}
         
-        # 2. Pacman bước 2
-        p_step_2 = self._predict_pacman_greedy(p_step_1, ghost_future_pos)
-        if p_step_2 == ghost_future_pos: return False # Bị bắt bước 2
-        
-        # 3. Kiểm tra xem sau khi chạy xong, Ghost có bị dồn vào đường cụt không?
-        # Nếu vị trí tương lai là ngõ cụt và Pacman đang bịt cửa -> Chết chắc
-        if ghost_future_pos in self.dead_ends:
-             # Nếu Pacman đang ở rất gần (<=3 ô) mà mình chui vào ngõ cụt -> Coi như chết
-             if self._manhattan_distance(ghost_future_pos, p_step_2) <= 3:
-                 return False
-
-        return True
-
-    def _predict_pacman_greedy(self, p_pos, g_pos):
-        """Dự đoán Pacman đi đâu (giả định nó đi hướng ngắn nhất tới mình)"""
-        best_p = p_pos
-        min_dist = float('inf')
-        for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-            np_pos = (p_pos[0]+dr, p_pos[1]+dc)
-            # Pacman không đi xuyên tường
-            if self._is_valid_coord(np_pos):
-                d = self._manhattan_distance(np_pos, g_pos)
-                if d < min_dist:
-                    min_dist = d
-                    best_p = np_pos
-        return best_p
-
-    # =========================================================================
-    # CÁC HÀM CŨ (GIỮ NGUYÊN)
-    # =========================================================================
-    def _safe_exploration(self, my_pos):
-        """Khám phá an toàn: ưu tiên ô chưa đi qua, tránh cẫm"""
-        valid_moves = self._get_valid_moves(my_pos)
-        if not valid_moves: 
-            return Move.STAY
-        
-        # Phân loại nước đi
-        good_moves = []  # Ô chưa đi qua và không phải cẫm
-        okay_moves = []  # Ô chưa đi qua nhưng là cẫm
-        bad_moves = []   # Ô đã đi qua
-        
-        for move in valid_moves:
-            next_pos = self._get_next_pos(my_pos, move)
-            visits = self.visit_map[next_pos]
-            is_dead_end = next_pos in self.dead_ends
+        while queue:
+            curr, path = queue.pop(0)
+            if curr == target: return path
             
-            if visits == 0:
-                if not is_dead_end:
-                    good_moves.append((move, next_pos))
-                else:
-                    okay_moves.append((move, next_pos))
-            else:
-                bad_moves.append((move, next_pos))
-        
-        # Ưu tiên: ô chưa đi + không cẫm > ô chưa đi + cẫm > ô đã đi
-        candidates = good_moves or okay_moves or bad_moves
-        
-        if not candidates:
-            return Move.STAY
-        
-        # Chọn từ best candidates
-        best_move = candidates[0][0]
-        best_score = -float('inf')
-        
-        for move, next_pos in candidates:
-            score = 0
-            score += self.direction_bias.get(move, 0)
-            if self.last_move and move == self.last_move:
-                score += self.params["W_INERTIA"]
-            if score > best_score:
-                best_score = score
-                best_move = move
-            
-        
-        return best_move
-
-    def _smart_exploration(self, my_pos):
-        """Khám phá thông minh: ưu tiên frontier và vùng chưa thấy"""
-        valid_moves = self._get_valid_moves(my_pos)
-        if not valid_moves: return Move.STAY
-        
-        # Update exploration targets mỗi 5 bước
-        if (self.pacman_last_seen_step - self.last_frontier_update) > 5:
-            self._update_exploration_targets()
-            self.last_frontier_update = self.pacman_last_seen_step
-        
-        best_move = Move.STAY
-        best_score = -float('inf')
-
-        for move in valid_moves:
-            next_pos = self._get_next_pos(my_pos, move)
-            score = 0
-            visits = self.visit_map[next_pos]
-            
-            # Prioritize unvisited cells
-            if visits == 0: score += 800
-            else: score -= visits * self.params["W_VISIT_PENALTY"]
-            
-            # Heavy penalty for dead ends
-            if next_pos in self.dead_ends: 
-                score -= 3000
-                # EXTRA PENALTY nếu Pacman gần last known position
-                if (self.last_known_enemy_pos and 
-                    self._manhattan_distance(next_pos, self.last_known_enemy_pos) <= 6):
-                    score -= 2000  # Death trap avoidance
-            
-            # Bonus for moving toward exploration targets (frontier)
-            if self.exploration_targets:
-                min_dist_to_frontier = min(self._manhattan_distance(next_pos, target) 
-                                         for target in self.exploration_targets)
-                score += max(0, 200 - min_dist_to_frontier * 20)
-            
-            # Inertia and direction bias
-            if self.last_move and move == self.last_move: score += self.params["W_INERTIA"]
-            score += self.direction_bias.get(move, 0)
-            
-            # Pacman prediction avoidance với risk assessment
-            if len(self.pacman_history) >= 2:
-                predicted_pacman_pos = self._predict_pacman_position()
-                if predicted_pacman_pos:
-                    dist_to_predicted = self._manhattan_distance(next_pos, predicted_pacman_pos)
-                    if dist_to_predicted <= 3:
-                        score -= 1000  # Avoid predicted Pacman area
-            
-            # Risk-based scoring
-            if self._is_in_bounds(next_pos) and self.risk_map is not None:
-                risk_score = self.risk_map[next_pos]
-                score -= risk_score * 50  # Penalty for high-risk areas
-            
-            # Memory decay bonus - ưu tiên vùng lâu chưa thăm
-            if str(next_pos) in self.cell_last_seen:
-                time_since_seen = self.current_step - self.cell_last_seen[str(next_pos)]
-                if time_since_seen > 20:  # Vùng lâu chưa thăm
-                    score += min(200, time_since_seen * 5)
-            
-            if score > best_score:
-                best_score = score
-                best_move = move
-        return best_move
-
-    def _panic_escape(self, my_pos, pacman_pos, legal_actions):
-        """Panic mode: Escape ngay lập tức khỏi death trap"""
-        if not pacman_pos:
-            return None
-            
-        best_action = None
-        max_distance = -1
-        
-        for action in legal_actions:
-            next_pos = self._get_next_pos(my_pos, action)
-            if self._is_valid_coord(next_pos):
-                # Tìm vị trí xa Pacman nhất và không phải dead-end
-                distance = self._manhattan_distance(next_pos, pacman_pos)
-                
-                # Bonus cho việc thoát khỏi dead-end
-                if next_pos not in self.dead_ends and my_pos in self.dead_ends:
-                    distance += 10  # Big bonus for escaping dead-end
-                
-                # Penalty cho việc vào dead-end khác
-                if next_pos in self.dead_ends:
-                    distance -= 5
-                
-                # Penalty cho việc đi về phía Pacman
-                if distance < self._manhattan_distance(my_pos, pacman_pos):
-                    distance -= 3
-                
-                if distance > max_distance:
-                    max_distance = distance
-                    best_action = action
-        
-        return best_action
-
-    def _precompute_map_features(self):
-        """
-        Tính toán các tính năng bản đồ (dead-end, corner).
-        Dùng self.ghost_map (bản đồ riêng với tầm nhìn hạn chế) thay vì walls.
-        """
-        self.dead_ends = set()
-        self.corners = set()
-        h, w = self.map_size
-        for r in range(h):
-            for c in range(w):
-                # Chỉ xét những ô Ghost đã nhìn thấy (không phải -1)
-                if self.ghost_map[r, c] == -1:  # Chưa nhìn thấy
-                    continue
-                if self.ghost_map[r, c] == 1:   # Là tường
-                    continue
-                
-                # Đếm bao nhiêu hướng bị chặn bởi tường hoặc biên hoặc chưa nhìn thấy
-                walls = 0
-                for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-                    nr, nc = r+dr, c+dc
-                    if not (0 <= nr < h and 0 <= nc < w):
-                        walls += 1
-                    elif self.ghost_map[nr, nc] == 1:  # Là tường
-                        walls += 1
-                    elif self.ghost_map[nr, nc] == -1:  # Chưa nhìn thấy - coi như tường để an toàn
-                        walls += 1
-                
-                if walls >= 3: 
-                    self.dead_ends.add((r, c))
-                elif walls >= 2: 
-                    self.corners.add((r, c))
-
-    def _get_valid_moves_coords(self, pos):
-        """Trả về list toạ độ (row, col) đi được theo bản đồ riêng của Ghost"""
-        valid = []
-        r, c = pos
-        h, w = self.map_size
-        for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-            nr, nc = r+dr, c+dc
-            if 0 <= nr < h and 0 <= nc < w:
-                cell_value = self.ghost_map[nr, nc]
-                # Nếu là -1 (chưa nhìn thấy) hoặc 0 (trống), có thể đi
-                if cell_value != 1:
-                    valid.append((nr, nc))
-        return valid
-
-    def _is_good_hiding_spot(self, pos):
-        return (pos in self.corners) or (pos in self.dead_ends)
-
-    def _find_nearest_cover(self, my_pos):
-        valid_moves = self._get_valid_moves(my_pos)
-        if not valid_moves: return Move.STAY
-        for move in valid_moves:
-            next_pos = self._get_next_pos(my_pos, move)
-            if (next_pos in self.dead_ends) or (next_pos in self.corners):
-                return move
-        return valid_moves[0]
-
-    def _get_valid_moves(self, pos):
-        valid = []
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            if self._is_valid_move(pos, move): valid.append(move)
-        return valid
-
-    def _is_valid_move(self, pos, move):
-        delta_row, delta_col = move.value
-        nr, nc = pos[0] + delta_row, pos[1] + delta_col
-        return self._is_valid_coord((nr, nc))
-
-    def _is_valid_coord(self, pos):
-        r, c = pos
-        h, w = self.map_size
-        if r < 0 or r >= h or c < 0 or c >= w: 
-            return False
-        # Kiểm tra xem ô này là tường theo bản đồ riêng
-        cell_value = self.ghost_map[r, c]
-        # Nếu là -1 (chưa nhìn thấy), cứ coi là có thể đi được
-        # Nếu là 1 (tường), không đi được
-        # Nếu là 0 (trống), đi được
-        return cell_value != 1
-
-    def _get_next_pos(self, pos, move):
-        delta_row, delta_col = move.value
-        return (pos[0] + delta_row, pos[1] + delta_col)
-
-    def _manhattan_distance(self, p1, p2):
-        return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
-
-    def _is_on_same_axis(self, pos1, pos2):
-        return pos1[0] == pos2[0] or pos1[1] == pos2[1]
-
-    def _get_visible_area(self, my_pos):
-        """Lấy tầm nhìn hiện tại (chữ thập radius 5)"""
-        r, c = my_pos
-        h, w = self.map_size
-        visible = {}
-        
-        # Center
-        visible[str(my_pos)] = int(self.ghost_map[r, c])
-        
-        # 4 hướng chính, mỗi hướng radius 5
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            for dist in range(1, 6):
-                nr, nc = r + dr*dist, c + dc*dist
-                if 0 <= nr < h and 0 <= nc < w:
-                    visible[str((nr, nc))] = int(self.ghost_map[nr, nc])
-        
-        return visible
-    
-    def _calculate_dynamic_trap_duration(self, pacman_pos):
-        """Tính trap duration dựa trên khoảng cách, risk và performance"""
-        base_duration = self.BASE_TRAP_DURATION
-        
-        if pacman_pos:
-            distance = self._manhattan_distance(self.trapped_pos or (0,0), pacman_pos)
-            # Càng xa Pacman, ở lại càng lâu
-            distance_multiplier = min(2.0, distance / 8.0)
-            duration = int(base_duration * distance_multiplier)
-            
-            # Adjust based on success rate
-            if self.escape_count + self.trap_success_count > 0:
-                success_rate = self.trap_success_count / (self.escape_count + self.trap_success_count)
-                if success_rate > 0.7:  # High success rate
-                    duration = int(duration * 1.2)  # Stay longer
-                elif success_rate < 0.3:  # Low success rate
-                    duration = int(duration * 0.8)  # Stay shorter
-        else:
-            # Không biết Pacman đâu -> ở lại lâu hơn nhưng có giới hạn
-            duration = int(base_duration * 1.3)
-        
-        return max(5, min(35, duration))  # Optimized range 5-35 bước
-    
-    def _update_exploration_targets(self):
-        """Cập nhật danh sách frontier cells để khám phá"""
-        self.exploration_targets = []
-        h, w = self.map_size
-        
-        for r in range(h):
-            for c in range(w):
-                if self.ghost_map[r, c] == 0:  # Ô trống đã thấy
-                    # Check if adjacent to unexplored area
-                    for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-                        nr, nc = r+dr, c+dc
-                        if (0 <= nr < h and 0 <= nc < w and 
-                            self.ghost_map[nr, nc] == -1):  # Chưa khám phá
-                            if (r, c) not in self.exploration_targets:
-                                self.exploration_targets.append((r, c))
+            for nr, nc in self._get_valid_neighbors(curr, map_state):
+                if (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    new_path = list(path)
+                    dr, dc = nr - curr[0], nc - curr[1]
+                    move_enum = None
+                    for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                        if m.value == (dr, dc):
+                            move_enum = m
                             break
-    
-    def _predict_pacman_position(self):
-        """Dự đoán vị trí Pacman dựa trên movement pattern"""
-        if len(self.pacman_history) < 3:
-            return None
-        
-        # Analyze recent movement vectors
-        recent_moves = []
-        for i in range(1, min(4, len(self.pacman_history))):
-            curr_pos, curr_time = self.pacman_history[-i]
-            prev_pos, prev_time = self.pacman_history[-i-1]
+                    if move_enum:
+                        new_path.append(move_enum)
+                        queue.append(((nr, nc), new_path))
+        return []
+
+    def _evaluate_best_move(self, my_pos, enemy_pos, target_pos, map_state, pacman_dist_map):
+        valid_neighbors = self._get_valid_neighbors(my_pos, map_state)
+        moves_score = []
+        height, width = map_state.shape
+
+        for nr, nc in valid_neighbors:
+            score = 0
             
-            if curr_time > prev_time:  # Valid time sequence
-                dx = curr_pos[0] - prev_pos[0]
-                dy = curr_pos[1] - prev_pos[1]
-                recent_moves.append((dx, dy))
-        
-        if not recent_moves:
-            return None
-        
-        # Calculate average movement vector
-        avg_dx = sum(dx for dx, dy in recent_moves) / len(recent_moves)
-        avg_dy = sum(dy for dx, dy in recent_moves) / len(recent_moves)
-        
-        # Predict future position
-        last_pos, last_time = self.pacman_history[-1]
-        time_diff = self.pacman_last_seen_step - last_time
-        
-        predicted_x = int(last_pos[0] + avg_dx * time_diff)
-        predicted_y = int(last_pos[1] + avg_dy * time_diff)
-        
-        # Clamp to map bounds
-        predicted_x = max(0, min(self.map_size[0]-1, predicted_x))
-        predicted_y = max(0, min(self.map_size[1]-1, predicted_y))
-        
-        return (predicted_x, predicted_y)
-    
-    def _update_memory_and_risk(self, my_pos, step_num):
-        """Cập nhật memory decay và risk assessment"""
-        if self.risk_map is None:
-            return  # Skip if risk map not initialized yet
+            # 1. SAFETY
+            real_dist_to_enemy = pacman_dist_map.get((nr, nc), 0)
+            # dist_to_enemy = abs(nr - enemy_pos[0]) + abs(nc - enemy_pos[1])
+            # if dist_to_enemy < 4: 
+            #     score -= 2000
+            #     score += dist_to_enemy * 50 
+            if real_dist_to_enemy <= 3: 
+                score -= 2000 # Tử địa thực sự
+            elif real_dist_to_enemy <= 5:
+                score -= 500
+                
+            score += real_dist_to_enemy * 20
             
-        # Update cell last seen times
-        r, c = my_pos
-        h, w = self.map_size
-        
-        # Center
-        self.cell_last_seen[str(my_pos)] = step_num
-        
-        # Visible area (chữ thập)
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            for dist in range(1, 6):
-                nr, nc = r + dr*dist, c + dc*dist
-                if 0 <= nr < h and 0 <= nc < w:
-                    self.cell_last_seen[str((nr, nc))] = step_num
-        
-        # Decay risk map over time
-        self.risk_map = self.risk_map * 0.95  # 5% decay mỗi bước
-        
-        # Update risk based on Pacman activity
-        for pos, time in self.pacman_history:
-            if step_num - time <= 10:  # Recent activity
-                self._increase_risk_around(pos, step_num - time)
-    
-    def _increase_risk_around(self, center, age):
-        """Tăng risk level xung quanh vị trí Pacman hoạt động"""
-        r, c = center
-        h, w = self.map_size
-        intensity = max(0.1, 1.0 - age / 10.0)  # Intensity giảm theo thời gian
-        
-        for dr in range(-3, 4):
-            for dc in range(-3, 4):
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < h and 0 <= nc < w:
-                    distance = abs(dr) + abs(dc)
-                    if distance <= 3:
-                        risk_increase = intensity * (4 - distance) / 4
-                        self.risk_map[nr, nc] = min(10.0, self.risk_map[nr, nc] + risk_increase)
-    
-    def _update_pacman_activity_zones(self, pacman_pos):
-        """Track các vùng Pacman hoạt động thường xuyên"""
-        # Simple clustering - merge nearby positions
-        for i, (zone_center, count) in enumerate(self.pacman_activity_zones):
-            if self._manhattan_distance(pacman_pos, zone_center) <= 4:
-                # Update existing zone
-                new_center = ((zone_center[0] + pacman_pos[0]) // 2, 
-                             (zone_center[1] + pacman_pos[1]) // 2)
-                self.pacman_activity_zones[i] = (new_center, count + 1)
-                return
-        
-        # Add new zone
-        if len(self.pacman_activity_zones) < 5:  # Limit to 5 zones
-            self.pacman_activity_zones.append((pacman_pos, 1))
-        else:
-            # Replace least active zone
-            min_idx = min(range(len(self.pacman_activity_zones)), 
-                         key=lambda i: self.pacman_activity_zones[i][1])
-            self.pacman_activity_zones[min_idx] = (pacman_pos, 1)
-    
-    def _is_in_bounds(self, pos):
-        """Check if position is within map bounds"""
-        r, c = pos
-        return 0 <= r < self.map_size[0] and 0 <= c < self.map_size[1]
+            # 2. LOS BREAKING
+            if not self._has_line_of_sight((nr, nc), enemy_pos, map_state):
+                score += 300 
+
+            # 3. ANTI-CORRIDOR & JUNCTION
+            next_valid_moves = self._get_valid_neighbors((nr, nc), map_state)
+            num_exits = len(next_valid_moves)
+            
+            is_corridor = False
+            if num_exits == 2:
+                r1, c1 = next_valid_moves[0]
+                r2, c2 = next_valid_moves[1]
+                if r1 == r2 or c1 == c2: 
+                    is_corridor = True
+            
+            if num_exits >= 3: score += 100 
+            elif num_exits == 1: score -= 500 
+            elif is_corridor: score -= 100 
+            else: score += 50 
+
+            # 4. WALL HUGGING
+            adjacent_walls = 0
+            for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+                 check_r, check_c = nr+dr, nc+dc
+                 if 0 <= check_r < height and 0 <= check_c < width:
+                     if map_state[check_r, check_c] == 1:
+                         adjacent_walls += 1
+            
+            if adjacent_walls > 0: score += 20 * adjacent_walls 
+
+            # 5. TARGET DIRECTION
+            dist_to_target = abs(nr - target_pos[0]) + abs(nc - target_pos[1])
+            score -= dist_to_target * 5 
+
+            # 6. HISTORY
+            if (nr, nc) in self.history:
+                score -= 200
+
+            dr, dc = nr - my_pos[0], nc - my_pos[1]
+            move_enum = Move.STAY
+            for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                if m.value == (dr, dc): 
+                    move_enum = m
+                    break
+            
+            moves_score.append((score, move_enum))
+
+        if not moves_score: return Move.STAY
+        moves_score.sort(key=lambda x: x[0], reverse=True)
+        return moves_score[0][1]
